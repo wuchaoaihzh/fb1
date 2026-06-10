@@ -132,7 +132,8 @@ function App() {
 
   const command = async (name: string, payload?: unknown, feedback?: string) => {
     if (feedback) notify(feedback);
-    const result = await window.radarApi?.command(name, payload);
+    const result = await window.radarApi?.command(name, payload) as { sent?: boolean } | undefined;
+    if (result?.sent === false) notify("命令发送失败，请查看运行日志");
     return result;
   };
 
@@ -191,6 +192,7 @@ function App() {
   const addGroup = () => {
     if (!groupUrl.trim()) return;
     updateSettings((settings) => ({ ...settings, groupMonitor: { ...settings.groupMonitor, groups: [...settings.groupMonitor.groups, createGroup(groupUrl.trim())] } }));
+    command("ui-log", `已添加群组链接：${groupUrl.trim()}`);
     setGroupUrl("");
   };
 
@@ -219,13 +221,17 @@ function App() {
 
       <section className="toolbar">
         <button onClick={() => command("start", undefined, "开始采集命令已发送")}><Play size={16} />开始采集</button>
+        <button onClick={() => command("pause", undefined, "暂停采集命令已发送")}><Pause size={16} />暂停采集</button>
         <button onClick={() => command("stop", undefined, "停止采集命令已发送")}><Square size={16} />停止采集</button>
         <button onClick={() => command("diagnose", undefined, "连接诊断命令已发送")}><Radio size={16} />测试连接</button>
+        <button onClick={() => command("test-collect", undefined, "测试采集一次命令已发送")}><Search size={16} />测试采集一次</button>
         <button onClick={() => command("test-scroll", undefined, "测试滚动一次命令已发送")}><Zap size={16} />测试滚动一次</button>
         <button onClick={() => command("clear")}><Trash2 size={16} />清空数据</button>
         <button onClick={() => command("export-xlsx")}><FileSpreadsheet size={16} />导出 Excel</button>
         <button onClick={() => command("export-csv")}><Download size={16} />导出 CSV</button>
         <button onClick={() => command("open-data-dir")}><FolderOpen size={16} />数据目录</button>
+        <button onClick={() => command("open-log-folder")}><FolderOpen size={16} />日志文件夹</button>
+        <button onClick={() => command("clear-logs")}><Trash2 size={16} />清空日志</button>
         <button onClick={() => command("test-sound")}><Volume2 size={16} />测试声音</button>
         <button onClick={() => command("test-flash")}><Bell size={16} />测试闪动</button>
       </section>
@@ -277,7 +283,7 @@ function App() {
       <section className="panel posts-panel">
         <div className="panel-head"><h2>实时帖子列表</h2><div className="filters"><div className="search"><Search size={16} /><input placeholder="搜索内容、群组、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}><option value="all">全部</option><option value="new">只看新帖</option><option value="alerted">只看已提醒</option><option value="unknown">时间未识别</option></select></div></div>
         <div className="table-wrap"><table><thead><tr><th>提醒状态</th><th>评分</th><th>新帖</th><th>群组名称</th><th>发布时间</th><th>内容摘要</th><th>匹配关键词</th><th>来源窗口</th><th>操作</th></tr></thead><tbody>
-          {posts.map((post) => <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""}><td>{post.alertTriggered ? "已提醒" : post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td><td>{post.postTextPreview}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.sourceWindowId}</td><td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button title="复制链接" onClick={() => navigator.clipboard.writeText(post.postUrl)}><Copy size={15} /></button><button onClick={() => command("mark-handled", post.postId)}>已处理</button><button onClick={() => command("ignore-post", post.postId)}>忽略</button><button onClick={() => setSelectedPost(post)}>详情</button></td></tr>)}
+          {posts.map((post) => <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""}><td>{post.alertTriggered ? "已提醒" : post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td><td>{post.postTextPreview}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.sourceWindowId}</td><td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button title="复制链接" onClick={() => { navigator.clipboard.writeText(post.postUrl); command("ui-log", `已复制帖子链接：${post.postUrl}`); notify("链接已复制"); }}><Copy size={15} /></button><button onClick={() => command("mark-handled", post.postId)}>已处理</button><button onClick={() => command("ignore-post", post.postId)}>忽略</button><button onClick={() => { setSelectedPost(post); command("ui-log", `查看帖子详情：${post.postUrl || post.postId}`); }}>详情</button></td></tr>)}
           {posts.length === 0 && <tr><td colSpan={9} className="empty">等待插件发送帖子。请打开 Facebook 群组页面后点击“测试连接”或“开始采集”。</td></tr>}
         </tbody></table></div>
       </section>

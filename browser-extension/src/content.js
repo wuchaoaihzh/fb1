@@ -123,27 +123,76 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
 }
 
 function scrollCandidates() {
-  const base = [document.scrollingElement, document.documentElement, document.body, document.querySelector("main"), document.querySelector("[role='main']")].filter(Boolean);
+  const centerElement = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2));
+  const ancestors = [];
+  let current = centerElement;
+  while (current) {
+    ancestors.push(current);
+    current = current.parentElement;
+  }
+  const base = [document.scrollingElement, document.documentElement, document.body, document.querySelector("main"), document.querySelector("[role='main']"), ...ancestors].filter(Boolean);
   const allScrollable = [...document.querySelectorAll("body *")]
     .filter((element) => element.scrollHeight > element.clientHeight + 120)
     .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))
-    .slice(0, 20);
+    .slice(0, 40);
   return [...new Set([...base, ...allScrollable])];
 }
 
-function tryScrollOnce() {
-  const distance = Math.max(600, Math.floor(window.innerHeight * 0.8));
+function scrollTopOf(target) {
+  if (target === document.body || target === document.documentElement || target === document.scrollingElement) {
+    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  }
+  return target.scrollTop || 0;
+}
+
+function dispatchWheel(target, distance) {
+  const eventInit = {
+    bubbles: true,
+    cancelable: true,
+    deltaY: distance,
+    deltaX: 0,
+    deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+    clientX: Math.floor(window.innerWidth / 2),
+    clientY: Math.floor(window.innerHeight / 2)
+  };
+  target.dispatchEvent(new WheelEvent("wheel", eventInit));
+  document.dispatchEvent(new WheelEvent("wheel", eventInit));
+  window.dispatchEvent(new WheelEvent("wheel", eventInit));
+}
+
+async function wait(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function tryScrollOnce() {
+  const distance = Math.floor(500 + Math.random() * 700);
   for (const target of scrollCandidates()) {
-    const before = target === document.body ? window.scrollY : target.scrollTop;
-    if (typeof target.scrollBy === "function") target.scrollBy({ top: distance, behavior: "smooth" });
-    else target.scrollTop += distance;
-    const after = target === document.body ? window.scrollY : target.scrollTop;
-    if (Math.abs(after - before) > 8) return { ok: true, distance, container: target.tagName || "unknown" };
+    const before = scrollTopOf(target);
+    dispatchWheel(target, distance);
+    await wait(220);
+    let after = scrollTopOf(target);
+    if (Math.abs(after - before) > 8) {
+      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "wheel", container: target.tagName || "unknown" };
+    }
+
+    if (typeof target.scrollBy === "function") target.scrollBy({ top: distance, behavior: "auto" });
+    else target.scrollTop = before + distance;
+    await wait(120);
+    after = scrollTopOf(target);
+    if (Math.abs(after - before) > 8) {
+      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "scrollBy", container: target.tagName || "unknown" };
+    }
   }
   const beforeWindow = window.scrollY;
-  window.scrollBy({ top: distance, behavior: "smooth" });
+  dispatchWheel(document.scrollingElement || document.body, distance);
+  await wait(220);
+  if (Math.abs(window.scrollY - beforeWindow) > 8) {
+    return { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "wheel-window", container: "window" };
+  }
+  window.scrollBy({ top: distance, behavior: "auto" });
+  await wait(120);
   return Math.abs(window.scrollY - beforeWindow) > 8
-    ? { ok: true, distance, container: "window" }
+    ? { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "window.scrollBy", container: "window" }
     : { ok: false, error: "没有找到可滚动容器，或页面已经到底部" };
 }
 
@@ -168,7 +217,7 @@ async function startAutoScroll(commandId, total) {
       sendAck(commandId, "start_auto_scroll", true, "自动滚动已停止", "collecting", { current: current - 1, total });
       return;
     }
-    const scrollResult = tryScrollOnce();
+    const scrollResult = await tryScrollOnce();
     await new Promise((resolve) => setTimeout(resolve, 2500));
     const posts = collectVisiblePosts();
     sendAck(
@@ -202,7 +251,7 @@ function startGroupMonitor(commandId, intervalSeconds) {
 async function diagnose(commandId) {
   const contentScript = true;
   const posts = collectVisiblePosts({ allowSeen: true });
-  const scrollResult = tryScrollOnce();
+  const scrollResult = await tryScrollOnce();
   sendAck(commandId, "diagnose", scrollResult.ok, scrollResult.ok ? "连接诊断完成，当前状态可正常使用" : `测试滚动失败：${scrollResult.error}`, scrollResult.ok ? "collecting" : "error", {
     localService: "正常",
     plugin: "正常",
@@ -240,8 +289,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "test_scroll_once") {
-    const result = tryScrollOnce();
-    sendResponse({ ...result, message: result.ok ? "测试滚动成功" : result.error, currentState: result.ok ? "collecting" : "error" });
+    tryScrollOnce().then((result) => sendResponse({ ...result, message: result.ok ? "测试滚动成功" : result.error, currentState: result.ok ? "collecting" : "error" }));
     return true;
   }
   if (message.type === "diagnose") {

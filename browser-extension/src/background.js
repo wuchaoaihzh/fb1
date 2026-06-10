@@ -103,6 +103,9 @@ async function runExtensionCommand(message) {
     } else if (commandType === "stop_collecting") {
       result = await sendToFacebookTab(message);
       extensionState = result.ok === false ? "error" : "stopped";
+    } else if (commandType === "test_collect_once") {
+      result = await sendToFacebookTab({ ...message, type: "collect_now" });
+      extensionState = result.ok === false ? "error" : "collecting";
     } else if (commandType === "start_auto_scroll") {
       result = await sendToFacebookTab(message);
       extensionState = result.ok === false ? "error" : "auto_scrolling";
@@ -142,6 +145,7 @@ function defaultSuccessMessage(commandType) {
     start_auto_scroll: "自动滚动已启动，正在控制 Facebook 页面滚动",
     stop_auto_scroll: "自动滚动已停止",
     test_scroll_once: "测试滚动成功",
+    test_collect_once: "测试采集完成",
     diagnose: "连接诊断完成",
     start_group_monitor: "群组监控已启动",
     stop_group_monitor: "群组监控已停止"

@@ -103,6 +103,7 @@ export type BridgeMessage =
   | { type: "stop_collecting"; commandId?: string }
   | { type: "start_auto_scroll"; commandId?: string; payload: { count: number } }
   | { type: "stop_auto_scroll"; commandId?: string }
+  | { type: "test_collect_once"; commandId?: string }
   | { type: "test_scroll_once"; commandId?: string }
   | { type: "diagnose"; commandId?: string }
   | { type: "start_group_monitor"; commandId?: string; payload: { intervalSeconds: number } }

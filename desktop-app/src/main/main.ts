@@ -32,16 +32,50 @@ const posts = new Map<string, RadarPost>();
 const clients = new Map<WebSocket, ExtensionClientInfo>();
 const httpClients = new Map<string, ExtensionClientInfo & { lastSeenAt: number }>();
 const commandQueues = new Map<string, BridgeMessage[]>();
-const operationLog: Array<{ at: string; message: string; level: "info" | "success" | "error" }> = [];
+type OperationLevel = "info" | "success" | "warning" | "error";
+
+const operationLog: Array<{ at: string; message: string; level: OperationLevel }> = [];
 const pendingCommands = new Map<string, { type: string; createdAt: number }>();
+const handledAckKeys = new Set<string>();
 const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
 
-function addOperation(message: string, level: "info" | "success" | "error" = "info"): void {
-  operationLog.unshift({ at: new Date().toLocaleTimeString(), message, level });
+function operationLogFile(): string {
+  return path.join(dataDir(), "operation.log");
+}
+
+function addOperation(message: string, level: OperationLevel = "info"): void {
+  const at = new Date().toLocaleTimeString();
+  operationLog.unshift({ at, message, level });
   operationLog.splice(80);
+  fs.appendFileSync(operationLogFile(), `[${at}] ${level.toUpperCase()} ${message}\n`, "utf8");
   broadcastState();
 }
+
+const commandLabels: Record<string, string> = {
+  start: "开始采集",
+  pause: "暂停采集",
+  stop: "停止采集",
+  clear: "清空数据",
+  "test-collect": "测试采集一次",
+  "test-scroll": "测试滚动一次",
+  diagnose: "测试连接",
+  "start-auto-scroll": "开始自动滚动",
+  "stop-auto-scroll": "停止自动滚动",
+  "test-sound": "测试声音提醒",
+  "test-flash": "测试窗口闪动",
+  "export-csv": "导出 CSV",
+  "export-xlsx": "导出 Excel",
+  "open-data-dir": "打开数据目录",
+  "open-log-folder": "打开日志文件夹",
+  "clear-logs": "清空日志",
+  "open-url": "打开帖子",
+  "mark-handled": "标记已处理",
+  "ignore-post": "忽略帖子",
+  "update-settings": "保存设置",
+  "start-group-monitor": "开始群组监控",
+  "stop-group-monitor": "停止群组监控"
+};
 
 function commandId(): string {
   return `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -164,9 +198,13 @@ function broadcastToExtensions(message: BridgeMessage): void {
 }
 
 function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" }>): void {
+  const ackKey = `${message.commandId}:${message.commandType}:${message.message}`;
+  if (handledAckKeys.has(ackKey)) return;
+  handledAckKeys.add(ackKey);
+  setTimeout(() => handledAckKeys.delete(ackKey), 60000);
   pendingCommands.delete(message.commandId);
   collectionState = message.currentState;
-  addOperation(`插件确认：${message.message}`, message.success ? "success" : "error");
+  addOperation(`插件确认：${message.message}${message.details ? `；详情：${JSON.stringify(message.details)}` : ""}`, message.success ? "success" : "error");
   if (!message.success) collectionState = "error";
   broadcastState();
 }
@@ -176,19 +214,21 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandI
   const connectedCount = stats().connectedClients;
   if (connectedCount === 0) {
     collectionState = "error";
-    addOperation("插件未连接，请确认浏览器插件已安装并打开 Facebook 页面", "error");
+    addOperation(`命令发送失败：${type}；未检测到已连接插件`, "error");
+    addOperation("建议：请确认 AdsPower 浏览器已安装插件，并打开 Facebook 页面", "warning");
     broadcastState();
     return { commandId: id, sent: false };
   }
   const message = payload === undefined ? ({ type, commandId: id } as BridgeMessage) : ({ type, commandId: id, payload } as BridgeMessage);
   pendingCommands.set(id, { type, createdAt: Date.now() });
-  addOperation(`${type} 命令已发送`, "info");
+  addOperation(`桌面端发送命令：${type}；commandId=${id}`, "info");
   broadcastToExtensions(message);
   setTimeout(() => {
     if (pendingCommands.has(id)) {
       pendingCommands.delete(id);
       collectionState = "error";
-      addOperation(`${type} 未收到插件确认，请检查 Facebook 页面是否打开`, "error");
+      addOperation(`${type} 未收到插件 ACK 确认；commandId=${id}`, "error");
+      addOperation("建议：请确认当前 AdsPower/Chrome 已打开 Facebook 群组页面，并在扩展页重新加载插件", "warning");
       broadcastState();
     }
   }, 12000);
@@ -412,6 +452,7 @@ function createWindow(): void {
 }
 
 ipcMain.handle("command", async (_event, command: string, payload?: unknown) => {
+  addOperation(`用户点击：${commandLabels[command] || command}`, "info");
   if (command === "start") {
     return sendCommand("start_collecting");
   }
@@ -421,21 +462,67 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
   if (command === "stop") {
     return sendCommand("stop_collecting");
   }
-  if (command === "clear") posts.clear();
+  if (command === "clear") {
+    posts.clear();
+    persistPosts();
+    addOperation("数据已清空", "success");
+  }
   if (command === "mark-handled" && typeof payload === "string") {
     const post = [...posts.values()].find((item) => item.postId === payload);
-    if (post) posts.set(dedupeKey(post), { ...post, handled: true, statusNote: "已处理" });
+    if (post) {
+      posts.set(dedupeKey(post), { ...post, handled: true, statusNote: "已处理" });
+      addOperation(`帖子已标记处理：${post.postUrl || post.postId}`, "success");
+    } else {
+      addOperation(`标记已处理失败：未找到帖子 ${payload}`, "error");
+    }
   }
   if (command === "ignore-post" && typeof payload === "string") {
     const post = [...posts.values()].find((item) => item.postId === payload);
-    if (post) posts.set(dedupeKey(post), { ...post, ignored: true, statusNote: "已忽略" });
+    if (post) {
+      posts.set(dedupeKey(post), { ...post, ignored: true, statusNote: "已忽略" });
+      addOperation(`帖子已忽略：${post.postUrl || post.postId}`, "success");
+    } else {
+      addOperation(`忽略帖子失败：未找到帖子 ${payload}`, "error");
+    }
   }
-  if (command === "test-sound") mainWindow?.webContents.send("play-alert-sound");
-  if (command === "test-flash") flashWindow();
-  if (command === "open-data-dir") await shell.openPath(dataDir());
-  if (command === "open-url" && typeof payload === "string") await shell.openExternal(payload);
-  if (command === "export-csv") return exportCsv();
-  if (command === "export-xlsx") return exportXlsx();
+  if (command === "test-sound") {
+    mainWindow?.webContents.send("play-alert-sound");
+    addOperation("声音提醒测试已触发", "success");
+  }
+  if (command === "test-flash") {
+    flashWindow();
+    addOperation("窗口闪动测试已触发", "success");
+  }
+  if (command === "open-data-dir") {
+    await shell.openPath(dataDir());
+    addOperation(`已打开数据目录：${dataDir()}`, "success");
+  }
+  if (command === "open-log-folder") {
+    await shell.openPath(dataDir());
+    addOperation(`已打开日志文件夹：${dataDir()}`, "success");
+  }
+  if (command === "clear-logs") {
+    operationLog.splice(0);
+    fs.writeFileSync(operationLogFile(), "", "utf8");
+    addOperation("运行日志已清空", "success");
+  }
+  if (command === "ui-log" && typeof payload === "string") {
+    addOperation(payload, "success");
+  }
+  if (command === "open-url" && typeof payload === "string") {
+    await shell.openExternal(payload);
+    addOperation(`已打开帖子链接：${payload}`, "success");
+  }
+  if (command === "export-csv") {
+    const file = await exportCsv();
+    addOperation(`CSV 导出完成：${file}`, "success");
+    return file;
+  }
+  if (command === "export-xlsx") {
+    const file = await exportXlsx();
+    addOperation(`Excel 导出完成：${file}`, "success");
+    return file;
+  }
   if (command === "update-settings") {
     settings = { ...defaultSettings, ...(payload as RadarSettings) };
     persistSettings();
@@ -443,6 +530,7 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
   }
   if (command === "start-auto-scroll") return sendCommand("start_auto_scroll", payload as { count: number });
   if (command === "stop-auto-scroll") return sendCommand("stop_auto_scroll");
+  if (command === "test-collect") return sendCommand("test_collect_once");
   if (command === "test-scroll") return sendCommand("test_scroll_once");
   if (command === "diagnose") return sendCommand("diagnose");
   if (command === "start-group-monitor") return sendCommand("start_group_monitor", payload as { intervalSeconds: number });
