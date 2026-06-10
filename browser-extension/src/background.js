@@ -4,12 +4,17 @@ let clientId = `ext-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 let connected = false;
 let latestSettings = null;
 
+function setConnected(value) {
+  connected = value;
+  chrome.storage.local.set({ connected, clientId, lastStatusAt: Date.now() });
+}
+
 function connect() {
   if (socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(socket.readyState)) return;
   socket = new WebSocket(LOCAL_WS);
 
   socket.addEventListener("open", () => {
-    connected = true;
+    setConnected(true);
     socket.send(JSON.stringify({ type: "extension_connected", clientId, payload: { userAgent: navigator.userAgent } }));
   });
 
@@ -30,12 +35,12 @@ function connect() {
   });
 
   socket.addEventListener("close", () => {
-    connected = false;
+    setConnected(false);
     setTimeout(connect, 2500);
   });
 
   socket.addEventListener("error", () => {
-    connected = false;
+    setConnected(false);
   });
 }
 
@@ -52,6 +57,7 @@ connect();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "get_status") {
+    connect();
     sendResponse({ connected, clientId, settings: latestSettings });
     return true;
   }

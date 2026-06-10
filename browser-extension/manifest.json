@@ -4,7 +4,14 @@
   "version": "0.1.0",
   "description": "Collects currently visible Facebook group posts and sends them to the local Radar desktop app.",
   "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": ["https://www.facebook.com/*", "https://facebook.com/*"],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://facebook.com/*",
+    "http://127.0.0.1:8765/*",
+    "ws://127.0.0.1:8765/*",
+    "http://localhost:8765/*",
+    "ws://localhost:8765/*"
+  ],
   "background": {
     "service_worker": "src/background.js"
   },
