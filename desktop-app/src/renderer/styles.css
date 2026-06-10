@@ -25,6 +25,21 @@ main {
   padding: 22px;
 }
 
+.toast {
+  position: fixed;
+  right: 22px;
+  top: 18px;
+  z-index: 10;
+  max-width: 420px;
+  padding: 11px 14px;
+  border: 1px solid #8fbba8;
+  border-radius: 8px;
+  background: #f4fff9;
+  color: #0f6049;
+  box-shadow: 0 8px 26px rgba(20, 35, 30, 0.15);
+  font-weight: 700;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -104,6 +119,18 @@ p {
 .compact span,
 .stat-card span {
   color: #637176;
+}
+
+.state-collecting,
+.state-auto_scrolling,
+.state-monitoring {
+  border-color: #88b99f;
+  background: #f5fff9;
+}
+
+.state-error {
+  border-color: #d99a91;
+  background: #fff5f3;
 }
 
 .stat-card {
@@ -214,6 +241,60 @@ textarea {
   color: #637176;
 }
 
+.operation-log {
+  display: grid;
+  gap: 7px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: #f6f8f7;
+  color: #344247;
+}
+
+.log-line span {
+  color: #66787d;
+}
+
+.log-line.success {
+  background: #edf9f2;
+  color: #0f6049;
+}
+
+.log-line.error {
+  background: #fff0ee;
+  color: #9b2d2d;
+}
+
+.monitor-panel {
+  margin-bottom: 14px;
+}
+
+.monitor-tools {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) max-content 120px repeat(3, max-content);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.monitor-list {
+  display: grid;
+  gap: 8px;
+}
+
+.monitor-row {
+  display: grid;
+  grid-template-columns: 24px minmax(150px, 1fr) 100px 160px 40px;
+  align-items: center;
+  gap: 8px;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -234,6 +315,19 @@ textarea {
 
 .keyword-panel {
   margin-bottom: 14px;
+}
+
+.collapse-head {
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+  padding: 0;
+  min-height: 20px;
+  font-weight: 800;
+}
+
+.keyword-panel:not(.open) {
+  padding: 12px 14px;
 }
 
 .keyword-tools {
@@ -346,6 +440,12 @@ td:nth-child(5) {
   padding: 28px;
 }
 
+.empty.slim {
+  padding: 12px;
+  background: #f8faf9;
+  border-radius: 6px;
+}
+
 .row-actions button {
   min-width: 34px;
   padding: 6px 8px;
@@ -395,7 +495,9 @@ dd {
 
   .keyword-tools,
   .keyword-import,
-  .keyword-list {
+  .keyword-list,
+  .monitor-tools,
+  .monitor-row {
     grid-template-columns: 1fr;
   }
 }

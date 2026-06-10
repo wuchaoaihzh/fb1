@@ -14,6 +14,7 @@ import {
   scorePost,
   shouldTriggerAlert,
   type BridgeMessage,
+  type CollectionState,
   type ExtensionClientInfo,
   type RadarPost,
   type RadarSettings,
@@ -26,13 +27,25 @@ const serverPort = 8765;
 
 let mainWindow: BrowserWindow | null = null;
 let settings: RadarSettings = defaultSettings;
-let collectionState: "collecting" | "paused" | "stopped" = "stopped";
+let collectionState: CollectionState = "stopped";
 const posts = new Map<string, RadarPost>();
 const clients = new Map<WebSocket, ExtensionClientInfo>();
 const httpClients = new Map<string, ExtensionClientInfo & { lastSeenAt: number }>();
 const commandQueues = new Map<string, BridgeMessage[]>();
+const operationLog: Array<{ at: string; message: string; level: "info" | "success" | "error" }> = [];
+const pendingCommands = new Map<string, { type: string; createdAt: number }>();
 const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
+
+function addOperation(message: string, level: "info" | "success" | "error" = "info"): void {
+  operationLog.unshift({ at: new Date().toLocaleTimeString(), message, level });
+  operationLog.splice(80);
+  broadcastState();
+}
+
+function commandId(): string {
+  return `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function dataDir(): string {
   const dir = path.join(app.getPath("userData"), "data");
@@ -60,7 +73,14 @@ function postsFile(): string {
 function loadPersistedData(): void {
   try {
     if (fs.existsSync(settingsFile())) {
-      settings = { ...defaultSettings, ...JSON.parse(fs.readFileSync(settingsFile(), "utf8")) };
+      const saved = JSON.parse(fs.readFileSync(settingsFile(), "utf8")) as Partial<RadarSettings>;
+      settings = {
+        ...defaultSettings,
+        ...saved,
+        alerts: { ...defaultSettings.alerts, ...saved.alerts },
+        autoScroll: { ...defaultSettings.autoScroll, ...saved.autoScroll },
+        groupMonitor: { ...defaultSettings.groupMonitor, ...saved.groupMonitor }
+      };
     }
     if (fs.existsSync(postsFile())) {
       const saved = JSON.parse(fs.readFileSync(postsFile(), "utf8")) as RadarPost[];
@@ -117,6 +137,7 @@ function appState() {
       posts: [...posts.values()].sort((a, b) => b.collectedAt.localeCompare(a.collectedAt)),
       settings,
       collectionState,
+      operationLog,
       stats: stats(),
       clients: [...clients.values(), ...activeHttpClients(new Set([...clients.values()].map((client) => client.clientId)))]
     }
@@ -140,6 +161,38 @@ function broadcastToExtensions(message: BridgeMessage): void {
     queue.push(message);
     commandQueues.set(client.clientId, queue.slice(-20));
   });
+}
+
+function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" }>): void {
+  pendingCommands.delete(message.commandId);
+  collectionState = message.currentState;
+  addOperation(`插件确认：${message.message}`, message.success ? "success" : "error");
+  if (!message.success) collectionState = "error";
+  broadcastState();
+}
+
+function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandId: string; sent: boolean } {
+  const id = commandId();
+  const connectedCount = stats().connectedClients;
+  if (connectedCount === 0) {
+    collectionState = "error";
+    addOperation("插件未连接，请确认浏览器插件已安装并打开 Facebook 页面", "error");
+    broadcastState();
+    return { commandId: id, sent: false };
+  }
+  const message = payload === undefined ? ({ type, commandId: id } as BridgeMessage) : ({ type, commandId: id, payload } as BridgeMessage);
+  pendingCommands.set(id, { type, createdAt: Date.now() });
+  addOperation(`${type} 命令已发送`, "info");
+  broadcastToExtensions(message);
+  setTimeout(() => {
+    if (pendingCommands.has(id)) {
+      pendingCommands.delete(id);
+      collectionState = "error";
+      addOperation(`${type} 未收到插件确认，请检查 Facebook 页面是否打开`, "error");
+      broadcastState();
+    }
+  }, 12000);
+  return { commandId: id, sent: true };
 }
 
 function flashWindow(): void {
@@ -283,6 +336,10 @@ function startLocalServer(): void {
     broadcastState();
     res.json({ ok: true, clientId, settings, commands });
   });
+  api.post("/command-ack", (req, res) => {
+    handleCommandAck(req.body as Extract<BridgeMessage, { type: "command_ack" }>);
+    res.json({ ok: true });
+  });
   api.post("/posts", (req, res) => {
     const body = req.body as { clientId?: string; posts?: Partial<RadarPost>[]; post?: Partial<RadarPost> };
     addPosts(body.posts || (body.post ? [body.post] : []), body.clientId);
@@ -322,6 +379,7 @@ function startLocalServer(): void {
       if (message.type === "post_collected") addPosts([message.payload], message.clientId || clientId);
       if (message.type === "posts_batch_collected") addPosts(message.payload, message.clientId || clientId);
       if (message.type === "ping") socket.send(JSON.stringify({ type: "pong", clientId }));
+      if (message.type === "command_ack") handleCommandAck(message);
     });
     socket.on("close", () => {
       clients.delete(socket);
@@ -355,18 +413,23 @@ function createWindow(): void {
 
 ipcMain.handle("command", async (_event, command: string, payload?: unknown) => {
   if (command === "start") {
-    collectionState = "collecting";
-    broadcastToExtensions({ type: "start_collecting" });
+    return sendCommand("start_collecting");
   }
   if (command === "pause") {
-    collectionState = "paused";
-    broadcastToExtensions({ type: "stop_collecting" });
+    return sendCommand("stop_collecting");
   }
   if (command === "stop") {
-    collectionState = "stopped";
-    broadcastToExtensions({ type: "stop_collecting" });
+    return sendCommand("stop_collecting");
   }
   if (command === "clear") posts.clear();
+  if (command === "mark-handled" && typeof payload === "string") {
+    const post = [...posts.values()].find((item) => item.postId === payload);
+    if (post) posts.set(dedupeKey(post), { ...post, handled: true, statusNote: "已处理" });
+  }
+  if (command === "ignore-post" && typeof payload === "string") {
+    const post = [...posts.values()].find((item) => item.postId === payload);
+    if (post) posts.set(dedupeKey(post), { ...post, ignored: true, statusNote: "已忽略" });
+  }
   if (command === "test-sound") mainWindow?.webContents.send("play-alert-sound");
   if (command === "test-flash") flashWindow();
   if (command === "open-data-dir") await shell.openPath(dataDir());
@@ -374,12 +437,16 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
   if (command === "export-csv") return exportCsv();
   if (command === "export-xlsx") return exportXlsx();
   if (command === "update-settings") {
-    settings = payload as RadarSettings;
+    settings = { ...defaultSettings, ...(payload as RadarSettings) };
     persistSettings();
     broadcastToExtensions({ type: "settings_updated", payload: settings });
   }
-  if (command === "start-auto-scroll") broadcastToExtensions({ type: "start_auto_scroll", payload: payload as { count: number } });
-  if (command === "stop-auto-scroll") broadcastToExtensions({ type: "stop_auto_scroll" });
+  if (command === "start-auto-scroll") return sendCommand("start_auto_scroll", payload as { count: number });
+  if (command === "stop-auto-scroll") return sendCommand("stop_auto_scroll");
+  if (command === "test-scroll") return sendCommand("test_scroll_once");
+  if (command === "diagnose") return sendCommand("diagnose");
+  if (command === "start-group-monitor") return sendCommand("start_group_monitor", payload as { intervalSeconds: number });
+  if (command === "stop-group-monitor") return sendCommand("stop_group_monitor");
   persistPosts();
   broadcastState();
   return null;

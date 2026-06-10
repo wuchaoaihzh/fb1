@@ -93,5 +93,10 @@ export const defaultSettings: RadarSettings = {
   autoScroll: {
     defaultScrollCount: 5,
     waitMsAfterScroll: 2500
+  },
+  groupMonitor: {
+    enabled: false,
+    defaultIntervalSeconds: 60,
+    groups: []
   }
 };

@@ -1,6 +1,6 @@
 export type TimeConfidence = "high" | "medium" | "low" | "unknown";
 
-export type CollectionState = "collecting" | "paused" | "stopped";
+export type CollectionState = "stopped" | "collecting" | "paused" | "auto_scrolling" | "monitoring" | "error";
 
 export type KeywordCategory = "highValue" | "normal" | "negative";
 
@@ -52,10 +52,29 @@ export interface AutoScrollSettings {
   waitMsAfterScroll: number;
 }
 
+export interface GroupMonitorItem {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  status: "not_open" | "open" | "monitoring" | "error";
+  intervalSeconds: 30 | 60 | 180 | 300;
+  lastCheckedAt?: string;
+  lastNewPostAt?: string;
+  todayNewPosts: number;
+}
+
+export interface GroupMonitorSettings {
+  enabled: boolean;
+  defaultIntervalSeconds: 30 | 60 | 180 | 300;
+  groups: GroupMonitorItem[];
+}
+
 export interface RadarSettings {
   keywords: KeywordItem[];
   alerts: AlertSettings;
   autoScroll: AutoScrollSettings;
+  groupMonitor: GroupMonitorSettings;
 }
 
 export interface ExtensionClientInfo {
@@ -80,10 +99,25 @@ export type BridgeMessage =
   | { type: "post_collected"; clientId: string; payload: Partial<RadarPost> }
   | { type: "posts_batch_collected"; clientId: string; payload: Partial<RadarPost>[] }
   | { type: "settings_updated"; payload: RadarSettings }
-  | { type: "start_collecting" }
-  | { type: "stop_collecting" }
-  | { type: "start_auto_scroll"; payload: { count: number } }
-  | { type: "stop_auto_scroll" }
+  | { type: "start_collecting"; commandId?: string }
+  | { type: "stop_collecting"; commandId?: string }
+  | { type: "start_auto_scroll"; commandId?: string; payload: { count: number } }
+  | { type: "stop_auto_scroll"; commandId?: string }
+  | { type: "test_scroll_once"; commandId?: string }
+  | { type: "diagnose"; commandId?: string }
+  | { type: "start_group_monitor"; commandId?: string; payload: { intervalSeconds: number } }
+  | { type: "stop_group_monitor"; commandId?: string }
+  | {
+      type: "command_ack";
+      clientId?: string;
+      commandId: string;
+      commandType: string;
+      success: boolean;
+      message: string;
+      currentState: CollectionState;
+      timestamp: string;
+      details?: Record<string, unknown>;
+    }
   | { type: "alert_triggered"; payload: { postId: string } }
   | { type: "ping"; clientId?: string }
   | { type: "pong"; clientId?: string };
