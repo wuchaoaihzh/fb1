@@ -19,6 +19,16 @@ import type { ExtensionClientInfo, RadarPost, RadarSettings, RadarStats } from "
 import { defaultSettings } from "@foradar/shared";
 import "./styles.css";
 
+// ==================== 类型声明 ====================
+declare global {
+  interface Window {
+    radarApi?: {
+      onAlertSound: (callback: () => void) => void;
+      command: (name: string, payload?: unknown) => void;
+    };
+  }
+}
+
 type CollectionState = "collecting" | "paused" | "stopped";
 
 interface AppState {
@@ -38,28 +48,24 @@ const emptyStats: RadarStats = {
   connectedClients: 0
 };
 
-function connectState(onState: (state: AppState) => void): WebSocket {
-  const socket = new WebSocket("ws://127.0.0.1:8765?role=renderer");
-  socket.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
-    if (message.type === "state") onState(message.payload);
-  });
-  return socket;
-}
-
+// ==================== 辅助函数 ====================
 function playBeep(): void {
-  const context = new AudioContext();
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-  oscillator.type = "sine";
-  oscillator.frequency.value = 880;
-  gain.gain.setValueAtTime(0.0001, context.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.25, context.currentTime + 0.02);
-  gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.5);
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.start();
-  oscillator.stop(context.currentTime + 0.55);
+  try {
+    const context = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.25, context.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.5);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.55);
+  } catch (e) {
+    console.warn("AudioContext failed", e);
+  }
 }
 
 function StatCard({ label, value }: { label: string; value: number | string }) {
@@ -71,6 +77,7 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
   );
 }
 
+// ==================== 主组件 ====================
 function App() {
   const [state, setState] = useState<AppState>({
     posts: [],
@@ -85,14 +92,73 @@ function App() {
   const [filter, setFilter] = useState<"all" | "new" | "alerted" | "unknown">("all");
   const [selectedPost, setSelectedPost] = useState<RadarPost | null>(null);
 
+  // WebSocket 连接（带自动重连）
   useEffect(() => {
-    const socket = connectState(setState);
-    socket.addEventListener("open", () => setSocketReady(true));
-    socket.addEventListener("close", () => setSocketReady(false));
-    window.radarApi.onAlertSound(playBeep);
-    return () => socket.close();
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      socket = new WebSocket("ws://127.0.0.1:8765?role=renderer");
+
+      socket.addEventListener("open", () => {
+        setSocketReady(true);
+        console.log("WebSocket connected");
+      });
+
+      socket.addEventListener("message", (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === "state") {
+            setState((prev) => ({ ...prev, ...message.payload }));
+          }
+        } catch (err) {
+          console.error("Failed to parse WebSocket message", err);
+        }
+      });
+
+      socket.addEventListener("close", () => {
+        setSocketReady(false);
+        console.log("WebSocket disconnected, reconnecting in 1s...");
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 1000);
+      });
+
+      socket.addEventListener("error", (err) => {
+        console.error("WebSocket error", err);
+        socket?.close();
+      });
+    };
+
+    connect();
+
+    return () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (socket) {
+        socket.close();
+        socket = null;
+      }
+    };
+  }, []); // 只在挂载时执行一次
+
+  // 注册声音提醒回调（如果 Electron API 可用）
+  useEffect(() => {
+    if (window.radarApi && typeof window.radarApi.onAlertSound === "function") {
+      window.radarApi.onAlertSound(playBeep);
+    } else {
+      console.warn("radarApi not available, sound alerts disabled");
+    }
   }, []);
 
+  // 发送命令的包装函数（防御性）
+  const command = (name: string, payload?: unknown) => {
+    if (window.radarApi?.command) {
+      window.radarApi.command(name, payload);
+    } else {
+      console.warn(`radarApi.command("${name}") 不可用`);
+    }
+  };
+
+  // 过滤帖子
   const posts = useMemo(() => {
     return state.posts.filter((post) => {
       if (filter === "new" && !post.isNewPost) return false;
@@ -102,8 +168,6 @@ function App() {
       return text.includes(query.toLowerCase());
     });
   }, [filter, query, state.posts]);
-
-  const command = (name: string, payload?: unknown) => window.radarApi.command(name, payload);
 
   return (
     <main>

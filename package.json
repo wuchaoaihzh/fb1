@@ -12,5 +12,8 @@
     "build": "npm run build --workspace @foradar/shared && npm run build --workspace facebook-opportunity-radar-desktop",
     "package:win": "npm run build && npm run package:win --workspace facebook-opportunity-radar-desktop",
     "typecheck": "npm run typecheck --workspace @foradar/shared && npm run typecheck --workspace facebook-opportunity-radar-desktop"
+  },
+  "dependencies": {
+    "electron": "^42.4.0"
   }
 }
