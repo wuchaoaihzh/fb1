@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification, shell } from "electron";
+﻿import { app, BrowserWindow, ipcMain, Notification, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -24,6 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const serverPort = 8765;
+app.setName("Facebook Opportunity Radar");
 
 let mainWindow: BrowserWindow | null = null;
 let settings: RadarSettings = defaultSettings;
@@ -84,7 +85,7 @@ function commandId(): string {
 function dataDir(): string {
   const dir = path.join(app.getPath("userData"), "data");
   fs.mkdirSync(dir, { recursive: true });
-  ["exports", "logs", "config", "groups", "history"].forEach((name) => fs.mkdirSync(path.join(dir, name), { recursive: true }));
+  ["exports", "logs", "config", "groups", "history", "cache"].forEach((name) => fs.mkdirSync(path.join(dir, name), { recursive: true }));
   return dir;
 }
 
@@ -210,8 +211,10 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
   handledAckKeys.add(ackKey);
   setTimeout(() => handledAckKeys.delete(ackKey), 60000);
   pendingCommands.delete(message.commandId);
-  collectionState = message.currentState;
-  addOperation(`插件确认：${message.message}${message.details ? `；详情：${JSON.stringify(message.details)}` : ""}`, message.success ? "success" : "error");
+  collectionState = message.pluginState || message.currentState || "error";
+  const detailText = message.details ? `；详情：${JSON.stringify(message.details)}` : "";
+  const locationText = message.url ? `；页面：${message.url}` : "";
+  addOperation(`插件确认：${message.message}${locationText}${detailText}`, message.success ? "success" : "error");
   if (!message.success) collectionState = "error";
   broadcastState();
 }
@@ -222,7 +225,7 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandI
   if (connectedCount === 0) {
     collectionState = "error";
     addOperation(`命令发送失败：${type}；未检测到已连接插件`, "error");
-    addOperation("建议：请确认 AdsPower 浏览器已安装插件，并打开 Facebook 页面", "warning");
+    addOperation("插件未连接，请确认浏览器插件已安装，并打开 Facebook 页面", "warning");
     broadcastState();
     return { commandId: id, sent: false };
   }
@@ -235,7 +238,7 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandI
       pendingCommands.delete(id);
       collectionState = "error";
       addOperation(`${type} 未收到插件 ACK 确认；commandId=${id}`, "error");
-      addOperation("建议：请确认当前 AdsPower/Chrome 已打开 Facebook 群组页面，并在扩展页重新加载插件", "warning");
+      addOperation("插件已断开或当前没有可采集的 Facebook 页面，请刷新 Facebook 页面或重新打开插件", "warning");
       broadcastState();
     }
   }, 12000);
@@ -260,7 +263,7 @@ function maybeAlert(post: RadarPost): RadarPost {
   if (settings.alerts.flashWindowEnabled) flashWindow();
   if (settings.alerts.desktopNotificationEnabled && Notification.isSupported()) {
     new Notification({
-      title: "发现新需求帖",
+      title: "发现新的机会帖子",
       body: `${alerted.rawTimeText || "时间未识别"} | ${alerted.score}分 | ${alerted.postTextPreview}`
     }).show();
   }
@@ -334,7 +337,10 @@ function exportRows() {
     排除关键词: post.negativeKeywords.join(", "),
     评分: post.score,
     是否已提醒: post.alertTriggered ? "是" : "否",
+    是否已处理: post.handled ? "是" : "否",
+    是否已忽略: post.ignored ? "是" : "否",
     采集时间: post.collectedAt,
+    来源窗口: post.sourceWindowId,
     状态备注: post.statusNote
   }));
 }
@@ -345,7 +351,9 @@ function timestampName(ext: string): string {
 }
 
 async function exportCsv(): Promise<string> {
-  const sheet = XLSX.utils.json_to_sheet(exportRows());
+  const rows = exportRows();
+  if (rows.length === 0) throw new Error("当前没有可导出的帖子");
+  const sheet = XLSX.utils.json_to_sheet(rows);
   const csv = XLSX.utils.sheet_to_csv(sheet);
   const file = timestampName("csv");
   fs.writeFileSync(file, csv, "utf8");
@@ -354,8 +362,10 @@ async function exportCsv(): Promise<string> {
 }
 
 async function exportXlsx(): Promise<string> {
+  const rows = exportRows();
+  if (rows.length === 0) throw new Error("当前没有可导出的帖子");
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(exportRows()), "Posts");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "Posts");
   const file = timestampName("xlsx");
   XLSX.writeFile(workbook, file);
   log("Excel exported", file);
@@ -479,6 +489,7 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     const post = [...posts.values()].find((item) => item.postId === payload);
     if (post) {
       posts.set(dedupeKey(post), { ...post, handled: true, statusNote: "已处理" });
+      persistPosts();
       addOperation(`帖子已标记处理：${post.postUrl || post.postId}`, "success");
     } else {
       addOperation(`标记已处理失败：未找到帖子 ${payload}`, "error");
@@ -488,6 +499,7 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     const post = [...posts.values()].find((item) => item.postId === payload);
     if (post) {
       posts.set(dedupeKey(post), { ...post, ignored: true, statusNote: "已忽略" });
+      persistPosts();
       addOperation(`帖子已忽略：${post.postUrl || post.postId}`, "success");
     } else {
       addOperation(`忽略帖子失败：未找到帖子 ${payload}`, "error");
@@ -499,7 +511,13 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
   }
   if (command === "test-flash") {
     flashWindow();
-    addOperation("窗口闪动测试已触发", "success");
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "Facebook Opportunity Radar",
+        body: "测试提醒：发现新的群组帖子"
+      }).show();
+    }
+    addOperation("窗口闪动和系统通知测试已触发", "success");
   }
   if (command === "open-data-dir") {
     const result = await shell.openPath(dataDir());
@@ -524,14 +542,24 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     addOperation(`已打开帖子链接：${payload}`, "success");
   }
   if (command === "export-csv") {
-    const file = await exportCsv();
-    addOperation(`CSV 导出完成：${file}`, "success");
-    return file;
+    try {
+      const file = await exportCsv();
+      addOperation(`CSV 导出完成：${file}`, "success");
+      return file;
+    } catch (error) {
+      addOperation(String(error instanceof Error ? error.message : error), "warning");
+      return null;
+    }
   }
   if (command === "export-xlsx") {
-    const file = await exportXlsx();
-    addOperation(`Excel 导出完成：${file}`, "success");
-    return file;
+    try {
+      const file = await exportXlsx();
+      addOperation(`Excel 导出完成：${file}`, "success");
+      return file;
+    } catch (error) {
+      addOperation(String(error instanceof Error ? error.message : error), "warning");
+      return null;
+    }
   }
   if (command === "update-settings") {
     const incoming = payload as RadarSettings;
@@ -546,10 +574,10 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     addOperation(`设置已保存；群组数量：${settings.groupMonitor.groups.length}`, "success");
     broadcastToExtensions({ type: "settings_updated", payload: settings });
   }
-  if (command === "start-auto-scroll") return sendCommand("start_auto_scroll", payload as { count: number });
+  if (command === "start-auto-scroll") return sendCommand("start_auto_scroll", payload as { count: number; delayMs?: number });
   if (command === "stop-auto-scroll") return sendCommand("stop_auto_scroll");
-  if (command === "test-collect") return sendCommand("test_collect_once");
-  if (command === "test-scroll") return sendCommand("test_scroll_once");
+  if (command === "test-collect") return sendCommand("collect_once");
+  if (command === "test-scroll") return sendCommand("scroll_once");
   if (command === "diagnose") return sendCommand("diagnose");
   if (command === "start-group-monitor") return sendCommand("start_group_monitor", payload as { intervalSeconds: number });
   if (command === "stop-group-monitor") return sendCommand("stop_group_monitor");

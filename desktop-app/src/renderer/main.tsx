@@ -79,6 +79,7 @@ function App() {
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
+  const [scrollDelaySeconds, setScrollDelaySeconds] = useState(Math.max(1, Math.round(defaultSettings.autoScroll.waitMsAfterScroll / 1000)));
   const [monitorInterval, setMonitorInterval] = useState(60);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "new" | "alerted" | "unknown">("all");
@@ -107,6 +108,7 @@ function App() {
           setState((previous) => ({ ...previous, ...message.payload, settings }));
           setDraftSettings(settings);
           setScrollCount(settings.autoScroll.defaultScrollCount);
+          setScrollDelaySeconds(Math.max(1, Math.round(settings.autoScroll.waitMsAfterScroll / 1000)));
           setMonitorInterval(settings.groupMonitor.defaultIntervalSeconds);
         }
       });
@@ -164,7 +166,7 @@ function App() {
   };
 
   const saveSettings = async () => {
-    await commitSettings({ ...draftSettings, autoScroll: { ...draftSettings.autoScroll, defaultScrollCount: scrollCount }, groupMonitor: { ...draftSettings.groupMonitor, defaultIntervalSeconds: monitorInterval as 30 | 60 | 180 | 300 } }, "设置已保存到本地配置文件");
+    await commitSettings({ ...draftSettings, autoScroll: { ...draftSettings.autoScroll, defaultScrollCount: scrollCount, waitMsAfterScroll: scrollDelaySeconds * 1000 }, groupMonitor: { ...draftSettings.groupMonitor, defaultIntervalSeconds: monitorInterval as 30 | 60 | 180 | 300 } }, "设置已保存到本地配置文件");
   };
 
   const posts = useMemo(() => {
@@ -320,8 +322,9 @@ function App() {
           <div className="panel-head"><h2>自动滚动</h2><span>{scrollCount} 次</span></div>
           <div className="segmented">{[3, 5, 8, 10, 999].map((count) => <button className={scrollCount === count ? "active" : ""} key={count} onClick={() => setScrollCount(count)}>{count === 999 ? "长时间" : count}</button>)}</div>
           <label className="field"><span>滚动次数</span><input min="1" max="999" type="number" value={scrollCount} onChange={(event) => setScrollCount(Number(event.target.value))} /></label>
+          <label className="field"><span>每次等待秒数</span><input min="1" max="30" type="number" value={scrollDelaySeconds} onChange={(event) => setScrollDelaySeconds(Number(event.target.value))} /></label>
           <div className="inline-actions">
-            <button onClick={() => command("start-auto-scroll", { count: scrollCount }, `自动滚动命令已发送：0 / ${scrollCount}`)}><Zap size={16} />开始自动滚动</button>
+            <button onClick={() => command("start-auto-scroll", { count: scrollCount, delayMs: scrollDelaySeconds * 1000 }, `自动滚动命令已发送：0 / ${scrollCount}`)}><Zap size={16} />开始自动滚动</button>
             <button onClick={() => command("stop-auto-scroll", undefined, "自动滚动停止命令已发送")}><Pause size={16} />停止自动滚动</button>
           </div>
         </div>

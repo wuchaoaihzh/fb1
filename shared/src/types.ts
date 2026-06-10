@@ -102,7 +102,11 @@ export type BridgeMessage =
   | { type: "start_collecting"; commandId?: string }
   | { type: "pause_collecting"; commandId?: string }
   | { type: "stop_collecting"; commandId?: string }
-  | { type: "start_auto_scroll"; commandId?: string; payload: { count: number } }
+  | { type: "collect_once"; commandId?: string }
+  | { type: "scroll_once"; commandId?: string }
+  | { type: "get_plugin_state"; commandId?: string }
+  | { type: "get_active_facebook_tabs"; commandId?: string }
+  | { type: "start_auto_scroll"; commandId?: string; payload: { count: number; delayMs?: number } }
   | { type: "stop_auto_scroll"; commandId?: string }
   | { type: "test_collect_once"; commandId?: string }
   | { type: "test_scroll_once"; commandId?: string }
@@ -114,10 +118,14 @@ export type BridgeMessage =
       clientId?: string;
       commandId: string;
       commandType: string;
+      command?: string;
       success: boolean;
       message: string;
       currentState: CollectionState;
+      pluginState?: CollectionState;
       timestamp: string;
+      tabId?: number;
+      url?: string;
       details?: Record<string, unknown>;
     }
   | { type: "alert_triggered"; payload: { postId: string } }

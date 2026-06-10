@@ -3,6 +3,29 @@ let autoScrollStopped = false;
 let monitorTimer = null;
 const seenKeys = new Set();
 
+const noiseTexts = new Set([
+  "facebook",
+  "home",
+  "watch",
+  "marketplace",
+  "groups",
+  "gaming",
+  "notifications",
+  "messenger",
+  "menu",
+  "like",
+  "comment",
+  "share",
+  "send",
+  "all reactions",
+  "write a comment",
+  "view more comments",
+  "most relevant",
+  "newest",
+  "author",
+  "top contributor"
+]);
+
 function hash(value) {
   let result = 5381;
   for (let index = 0; index < value.length; index += 1) result = (result * 33) ^ value.charCodeAt(index);
@@ -18,13 +41,33 @@ function normalizeUrl(url) {
 }
 
 function visibleText(element) {
-  return (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+  return (element?.innerText || element?.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function visibleLines(element) {
+  return (element?.innerText || element?.textContent || "")
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function isNoiseLine(line) {
+  const text = line.trim();
+  const lower = text.toLowerCase();
+  if (!text) return true;
+  if (noiseTexts.has(lower)) return true;
+  if (/^(like|comment|share|send|\d+\s+comments?|\d+\s+shares?)$/i.test(text)) return true;
+  if (/^(home|watch|marketplace|groups|gaming|notifications|messenger)$/i.test(text)) return true;
+  if (/^(\d+[smhdw]|just now|yesterday)$/i.test(text)) return true;
+  if (text.length <= 2) return true;
+  return false;
 }
 
 function findGroupName() {
   const heading = document.querySelector("h1");
-  if (heading && visibleText(heading)) return visibleText(heading);
-  return document.title.replace(/\| Facebook$/, "").trim() || "未知群组";
+  const title = visibleText(heading);
+  if (title) return title;
+  return document.title.replace(/\| Facebook$/i, "").trim() || "未知群组";
 }
 
 function findGroupUrl() {
@@ -33,12 +76,14 @@ function findGroupUrl() {
 }
 
 function likelyPostContainers() {
-  const articles = [...document.querySelectorAll("[role='article']")];
-  const feedItems = [...document.querySelectorAll("[data-pagelet*='FeedUnit'], [aria-posinset]")];
-  const candidates = [...articles, ...feedItems].filter((element) => {
+  const candidates = [
+    ...document.querySelectorAll("[role='article']"),
+    ...document.querySelectorAll("[data-pagelet*='FeedUnit']"),
+    ...document.querySelectorAll("[aria-posinset]")
+  ].filter((element) => {
     const rect = element.getBoundingClientRect();
     const text = visibleText(element);
-    return rect.bottom > 0 && rect.top < window.innerHeight && text.length >= 20;
+    return rect.bottom > 0 && rect.top < window.innerHeight * 1.25 && text.length >= 20;
   });
   return [...new Set(candidates)];
 }
@@ -55,12 +100,8 @@ function findRawTime(container) {
     const value = element.getAttribute("datetime") || element.getAttribute("aria-label") || element.getAttribute("title") || visibleText(element);
     if (looksLikeTime(value)) return value.trim();
   }
-  const anchors = [...container.querySelectorAll("a[href]")];
-  for (const anchor of anchors) {
-    const text = visibleText(anchor);
-    if (looksLikeTime(text)) return text;
-    const match = visibleText(anchor.parentElement || anchor).match(/\b(Just now|\d+\s*(?:m|min|mins|h|hr|hrs|d|day|days|w|week|weeks)|Yesterday)\b|刚刚|\d+\s*(?:分钟|小时|天|周)前/i);
-    if (match) return match[0];
+  for (const line of visibleLines(container)) {
+    if (looksLikeTime(line)) return line;
   }
   return "";
 }
@@ -79,19 +120,56 @@ function findAuthor(container) {
   if (strong && visibleText(strong).length < 80) return visibleText(strong);
   const authorLink = [...container.querySelectorAll("a[href]")].find((anchor) => {
     const text = visibleText(anchor);
-    return text && text.length < 80 && !looksLikeTime(text) && !anchor.href.includes("/groups/");
+    return text && text.length < 80 && !looksLikeTime(text) && !anchor.href.includes("/groups/") && !isNoiseLine(text);
   });
   return authorLink ? visibleText(authorLink) : "";
 }
 
+function extractPostText(container, authorName, rawTimeText) {
+  const messageSelectors = [
+    "div[data-ad-preview='message']",
+    "div[data-ad-comet-preview='message']",
+    "[data-testid='post_message']",
+    "[dir='auto']"
+  ];
+  const candidateLines = [];
+
+  for (const selector of messageSelectors) {
+    for (const element of container.querySelectorAll(selector)) {
+      const text = visibleText(element);
+      if (text && text.length >= 8) candidateLines.push(text);
+    }
+  }
+
+  if (candidateLines.length === 0) {
+    candidateLines.push(
+      ...visibleLines(container).filter((line) => {
+        if (line === authorName || line === rawTimeText) return false;
+        if (isNoiseLine(line)) return false;
+        return true;
+      })
+    );
+  }
+
+  const cleaned = candidateLines
+    .map((line) => line.replace(authorName || "", "").replace(rawTimeText || "", "").trim())
+    .filter((line) => !isNoiseLine(line))
+    .filter((line, index, list) => list.indexOf(line) === index);
+
+  const meaningful = cleaned
+    .filter((line) => line.length >= 8)
+    .sort((a, b) => b.length - a.length);
+
+  return meaningful[0] || cleaned.join(" ").slice(0, 500) || "";
+}
+
 function extractPost(container) {
   const postUrl = findPostUrl(container);
-  const rawText = visibleText(container);
   const rawTimeText = findRawTime(container);
   const groupName = findGroupName();
   const groupUrl = findGroupUrl();
   const authorName = findAuthor(container);
-  const postText = rawText.replace(authorName, "").replace(rawTimeText, "").replace(/\bLike\b|\bComment\b|\bShare\b/gi, "").trim();
+  const postText = extractPostText(container, authorName, rawTimeText);
   const postId = hash([postUrl, postText.slice(0, 120), groupName, rawTimeText].join("|"));
   return {
     postId,
@@ -111,9 +189,11 @@ function extractPost(container) {
 
 function collectVisiblePosts({ allowSeen = false } = {}) {
   if (!collecting) return [];
-  const posts = likelyPostContainers().map(extractPost).filter((post) => post.postText.length >= 12);
+  const posts = likelyPostContainers()
+    .map(extractPost)
+    .filter((post) => post.postText.length >= 8 && !isNoiseLine(post.postText));
   const fresh = allowSeen ? posts : posts.filter((post) => {
-    const key = post.postUrl || post.postId;
+    const key = post.postUrl && post.postUrl !== window.location.href ? post.postUrl : post.postId;
     if (seenKeys.has(key)) return false;
     seenKeys.add(key);
     return true;
@@ -130,11 +210,18 @@ function scrollCandidates() {
     ancestors.push(current);
     current = current.parentElement;
   }
-  const base = [document.scrollingElement, document.documentElement, document.body, document.querySelector("main"), document.querySelector("[role='main']"), ...ancestors].filter(Boolean);
+  const base = [
+    document.scrollingElement,
+    document.documentElement,
+    document.body,
+    document.querySelector("main"),
+    document.querySelector("[role='main']"),
+    ...ancestors
+  ].filter(Boolean);
   const allScrollable = [...document.querySelectorAll("body *")]
     .filter((element) => element.scrollHeight > element.clientHeight + 120)
     .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))
-    .slice(0, 40);
+    .slice(0, 50);
   return [...new Set([...base, ...allScrollable])];
 }
 
@@ -164,36 +251,39 @@ async function wait(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function tryScrollOnce() {
-  const distance = Math.floor(500 + Math.random() * 700);
+async function tryScrollOnce(preferredDistance) {
+  const distance = Math.floor(preferredDistance || (600 + Math.random() * 600));
   for (const target of scrollCandidates()) {
     const before = scrollTopOf(target);
-    dispatchWheel(target, distance);
-    await wait(220);
-    let after = scrollTopOf(target);
-    if (Math.abs(after - before) > 8) {
-      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "wheel", container: target.tagName || "unknown" };
-    }
 
     if (typeof target.scrollBy === "function") target.scrollBy({ top: distance, behavior: "auto" });
     else target.scrollTop = before + distance;
-    await wait(120);
-    after = scrollTopOf(target);
+    await wait(180);
+    let after = scrollTopOf(target);
     if (Math.abs(after - before) > 8) {
       return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "scrollBy", container: target.tagName || "unknown" };
     }
+
+    dispatchWheel(target, distance);
+    await wait(220);
+    after = scrollTopOf(target);
+    if (Math.abs(after - before) > 8) {
+      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "wheel", container: target.tagName || "unknown" };
+    }
   }
+
   const beforeWindow = window.scrollY;
+  window.scrollBy({ top: distance, behavior: "auto" });
+  await wait(180);
+  if (Math.abs(window.scrollY - beforeWindow) > 8) {
+    return { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "window.scrollBy", container: "window" };
+  }
+
   dispatchWheel(document.scrollingElement || document.body, distance);
   await wait(220);
-  if (Math.abs(window.scrollY - beforeWindow) > 8) {
-    return { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "wheel-window", container: "window" };
-  }
-  window.scrollBy({ top: distance, behavior: "auto" });
-  await wait(120);
   return Math.abs(window.scrollY - beforeWindow) > 8
-    ? { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "window.scrollBy", container: "window" }
-    : { ok: false, error: "没有找到可滚动容器，或页面已经到底部" };
+    ? { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "wheel-window", container: "window" }
+    : { ok: false, code: "auto_scroll_failed", error: "没有找到可滚动容器，或页面已经到底部" };
 }
 
 function sendAck(commandId, commandType, success, message, currentState, details = {}) {
@@ -201,24 +291,36 @@ function sendAck(commandId, commandType, success, message, currentState, details
     type: "command_ack",
     commandId,
     commandType,
+    command: commandType,
     success,
     message,
     currentState,
+    pluginState: currentState,
     details
   });
 }
 
-async function startAutoScroll(commandId, total) {
+async function startAutoScroll(commandId, total, delayMs) {
   autoScrollStopped = false;
   collecting = true;
-  sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前滑动次数：0 / ${total}`, "auto_scrolling", { current: 0, total });
+  sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前滑动次数：0 / ${total}`, "auto_scrolling", {
+    currentStep: 0,
+    totalSteps: total,
+    delayMs
+  });
+
   for (let current = 1; current <= total; current += 1) {
     if (autoScrollStopped) {
-      sendAck(commandId, "start_auto_scroll", true, "自动滚动已停止", "collecting", { current: current - 1, total });
+      sendAck(commandId, "start_auto_scroll", true, "自动滚动已停止", "collecting", {
+        currentStep: current - 1,
+        totalSteps: total,
+        delayMs
+      });
       return;
     }
+
     const scrollResult = await tryScrollOnce();
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await wait(delayMs);
     const posts = collectVisiblePosts();
     sendAck(
       commandId,
@@ -226,11 +328,23 @@ async function startAutoScroll(commandId, total) {
       scrollResult.ok,
       scrollResult.ok ? `自动滚动第 ${current} 次完成，采集到 ${posts.length} 个新帖子` : `自动滚动第 ${current} 次失败：${scrollResult.error}`,
       scrollResult.ok ? "auto_scrolling" : "error",
-      { ...scrollResult, current, total, collectedCount: posts.length }
+      {
+        ...scrollResult,
+        currentStep: current,
+        totalSteps: total,
+        delayMs,
+        scrollDistance: scrollResult.distance,
+        collectedCount: posts.length
+      }
     );
     if (!scrollResult.ok) return;
   }
-  sendAck(commandId, "start_auto_scroll", true, "自动滚动已完成", "collecting", { current: total, total });
+
+  sendAck(commandId, "start_auto_scroll", true, "自动滚动已完成", "collecting", {
+    currentStep: total,
+    totalSteps: total,
+    delayMs
+  });
 }
 
 function startGroupMonitor(commandId, intervalSeconds) {
@@ -249,17 +363,23 @@ function startGroupMonitor(commandId, intervalSeconds) {
 }
 
 async function diagnose(commandId) {
-  const contentScript = true;
   const posts = collectVisiblePosts({ allowSeen: true });
   const scrollResult = await tryScrollOnce();
-  sendAck(commandId, "diagnose", scrollResult.ok, scrollResult.ok ? "连接诊断完成，当前状态可正常使用" : `测试滚动失败：${scrollResult.error}`, scrollResult.ok ? "collecting" : "error", {
-    localService: "正常",
-    plugin: "正常",
-    facebookPage: location.href,
-    contentScript,
-    testCollect: { ok: true, count: posts.length },
-    testScroll: scrollResult
-  });
+  sendAck(
+    commandId,
+    "diagnose",
+    scrollResult.ok,
+    scrollResult.ok ? "连接诊断完成：当前状态可正常使用" : `测试滚动失败：${scrollResult.error}`,
+    scrollResult.ok ? "collecting" : "error",
+    {
+      localService: "正常",
+      plugin: "正常",
+      facebookPage: location.href,
+      contentScript: "已注入",
+      testCollect: { ok: true, count: posts.length },
+      testScroll: scrollResult
+    }
+  );
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -270,7 +390,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "collect_now" || message.type === "start_collecting") {
     collecting = true;
     const posts = collectVisiblePosts();
-    sendResponse({ ok: true, message: "采集已启动，当前正在监听 Facebook 页面", count: posts.length, currentState: "collecting" });
+    sendResponse({ ok: true, message: `采集已启动，当前正在监听 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" });
     return true;
   }
   if (message.type === "stop_collecting") {
@@ -282,11 +402,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "pause_collecting") {
     collecting = false;
     autoScrollStopped = true;
-    sendResponse({ ok: true, message: "采集已暂停，数据已保留", currentState: "paused" });
+    sendResponse({ ok: true, message: "采集已暂停", currentState: "paused" });
     return true;
   }
   if (message.type === "start_auto_scroll") {
-    startAutoScroll(message.commandId || `content-${Date.now()}`, Number(message.payload?.count || 5));
+    const total = Math.max(1, Number(message.payload?.count || 5));
+    const delayMs = Math.max(1000, Number(message.payload?.delayMs || 3000));
+    startAutoScroll(message.commandId || `content-${Date.now()}`, total, delayMs);
     sendResponse({ ok: true, message: "自动滚动已启动", currentState: "auto_scrolling" });
     return true;
   }
@@ -296,7 +418,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "test_scroll_once") {
-    tryScrollOnce().then((result) => sendResponse({ ...result, message: result.ok ? "测试滚动成功" : result.error, currentState: result.ok ? "collecting" : "error" }));
+    tryScrollOnce().then((result) => {
+      const posts = result.ok ? collectVisiblePosts() : [];
+      sendResponse({
+        ...result,
+        message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 个新帖子` : result.error,
+        currentState: result.ok ? "collecting" : "error",
+        collectedCount: posts.length
+      });
+    });
     return true;
   }
   if (message.type === "diagnose") {
@@ -315,6 +445,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, message: "群组监控已停止", currentState: "stopped" });
     return true;
   }
+  sendResponse({ ok: false, message: `content script 未实现命令：${message.type}`, currentState: "error" });
   return true;
 });
 
