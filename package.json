@@ -1,0 +1,16 @@
+{
+  "name": "facebook-opportunity-radar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local desktop radar and Chrome extension for spotting visible Facebook group sourcing opportunities.",
+  "workspaces": [
+    "shared",
+    "desktop-app"
+  ],
+  "scripts": {
+    "dev": "npm run build --workspace @foradar/shared && npm run dev --workspace facebook-opportunity-radar-desktop",
+    "build": "npm run build --workspace @foradar/shared && npm run build --workspace facebook-opportunity-radar-desktop",
+    "package:win": "npm run build && npm run package:win --workspace facebook-opportunity-radar-desktop",
+    "typecheck": "npm run typecheck --workspace @foradar/shared && npm run typecheck --workspace facebook-opportunity-radar-desktop"
+  }
+}

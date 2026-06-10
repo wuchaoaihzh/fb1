@@ -1,0 +1,43 @@
+body {
+  width: 260px;
+  margin: 0;
+  padding: 12px;
+  font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  color: #172026;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+#status {
+  color: #9c3d32;
+}
+
+#status.online {
+  color: #0f7c55;
+}
+
+button {
+  width: 100%;
+  min-height: 34px;
+  margin: 5px 0;
+  border: 1px solid #b8c8c1;
+  border-radius: 6px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #126a50;
+  color: #126a50;
+}
+
+p {
+  margin: 10px 0 0;
+  color: #627276;
+  line-height: 1.45;
+}

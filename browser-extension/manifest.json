@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Facebook Opportunity Radar Connector",
+  "version": "0.1.0",
+  "description": "Collects currently visible Facebook group posts and sends them to the local Radar desktop app.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://www.facebook.com/*", "https://facebook.com/*"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/*", "https://facebook.com/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Opportunity Radar"
+  },
+  "options_page": "options/options.html"
+}
