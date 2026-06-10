@@ -1,5 +1,7 @@
 const LOCAL_WS = "ws://127.0.0.1:8765";
 const LOCAL_HEALTH = "http://127.0.0.1:8765/health";
+const LOCAL_HEARTBEAT = "http://127.0.0.1:8765/client-heartbeat";
+const LOCAL_POSTS = "http://127.0.0.1:8765/posts";
 let socket = null;
 let clientId = `ext-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 let connected = false;
@@ -10,6 +12,24 @@ let heartbeatTimer = null;
 function setConnected(value) {
   connected = value;
   chrome.storage.local.set({ connected, clientId, lastStatusAt: Date.now() });
+}
+
+async function heartbeatToLocal() {
+  try {
+    const response = await fetch(LOCAL_HEARTBEAT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId, userAgent: navigator.userAgent })
+    });
+    if (!response.ok) throw new Error(`Heartbeat failed: ${response.status}`);
+    const data = await response.json();
+    if (data.settings) latestSettings = data.settings;
+    setConnected(true);
+    return true;
+  } catch {
+    setConnected(false);
+    return false;
+  }
 }
 
 function scheduleReconnect(delay = 2500) {
@@ -30,6 +50,7 @@ function stopHeartbeat() {
 function startHeartbeat() {
   stopHeartbeat();
   heartbeatTimer = setInterval(() => {
+    heartbeatToLocal();
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       stopHeartbeat();
       scheduleReconnect();
@@ -60,6 +81,7 @@ async function connect() {
 
   socket.addEventListener("open", () => {
     setConnected(true);
+    heartbeatToLocal();
     startHeartbeat();
     socket.send(JSON.stringify({ type: "extension_connected", clientId, payload: { userAgent: navigator.userAgent } }));
   });
@@ -92,9 +114,25 @@ async function connect() {
   });
 }
 
-function sendToLocal(message) {
-  connect();
-  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+async function sendToLocal(message) {
+  await connect();
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    try {
+      const body = message.type === "posts_batch_collected"
+        ? { clientId, posts: message.payload }
+        : { clientId, post: message.payload };
+      const response = await fetch(LOCAL_POSTS, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) throw new Error(`Post failed: ${response.status}`);
+      await heartbeatToLocal();
+      return true;
+    } catch {
+      return false;
+    }
+  }
   socket.send(JSON.stringify({ ...message, clientId }));
   return true;
 }
@@ -105,14 +143,15 @@ connect();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "get_status") {
-    connect();
-    sendResponse({ connected, clientId, settings: latestSettings });
+    heartbeatToLocal().then(() => {
+      connect();
+      sendResponse({ connected, clientId, settings: latestSettings });
+    });
     return true;
   }
 
   if (message.type === "posts_batch_collected" || message.type === "post_collected") {
-    const ok = sendToLocal(message);
-    sendResponse({ ok, connected });
+    sendToLocal(message).then((ok) => sendResponse({ ok, connected }));
     return true;
   }
 
@@ -140,8 +179,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sourceAccountNote: "",
       statusNote: "测试数据"
     };
-    const ok = sendToLocal({ type: "post_collected", payload: post });
-    sendResponse({ ok, connected });
+    sendToLocal({ type: "post_collected", payload: post }).then((ok) => sendResponse({ ok, connected }));
     return true;
   }
 });

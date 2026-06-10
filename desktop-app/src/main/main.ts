@@ -29,6 +29,7 @@ let settings: RadarSettings = defaultSettings;
 let collectionState: "collecting" | "paused" | "stopped" = "stopped";
 const posts = new Map<string, RadarPost>();
 const clients = new Map<WebSocket, ExtensionClientInfo>();
+const httpClients = new Map<string, ExtensionClientInfo & { lastSeenAt: number }>();
 const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
 
@@ -86,8 +87,26 @@ function stats(): RadarStats {
     todayPosts: values.filter((post) => post.collectedAt.startsWith(today)).length,
     alertedPosts: values.filter((post) => post.alertTriggered).length,
     unknownTimePosts: values.filter((post) => post.timeConfidence === "unknown").length,
-    connectedClients: clients.size
+    connectedClients: clients.size + activeHttpClients(new Set([...clients.values()].map((client) => client.clientId))).length
   };
+}
+
+function activeHttpClients(excludedClientIds = new Set<string>()): ExtensionClientInfo[] {
+  const now = Date.now();
+  const active: ExtensionClientInfo[] = [];
+  httpClients.forEach((client, clientId) => {
+    if (now - client.lastSeenAt > 45000) {
+      httpClients.delete(clientId);
+      return;
+    }
+    if (!excludedClientIds.has(client.clientId)) active.push({
+      clientId: client.clientId,
+      connectedAt: client.connectedAt,
+      tabUrl: client.tabUrl,
+      userAgent: client.userAgent
+    });
+  });
+  return active;
 }
 
 function appState() {
@@ -98,7 +117,7 @@ function appState() {
       settings,
       collectionState,
       stats: stats(),
-      clients: [...clients.values()]
+      clients: [...clients.values(), ...activeHttpClients(new Set([...clients.values()].map((client) => client.clientId)))]
     }
   };
 }
@@ -240,8 +259,22 @@ async function exportXlsx(): Promise<string> {
 function startLocalServer(): void {
   const api = express();
   api.use(express.json({ limit: "5mb" }));
-  api.get("/health", (_req, res) => res.json({ ok: true, connectedClients: clients.size }));
+  api.get("/health", (_req, res) => res.json({ ok: true, connectedClients: stats().connectedClients }));
   api.get("/state", (_req, res) => res.json(appState().payload));
+  api.post("/client-heartbeat", (req, res) => {
+    const body = req.body as { clientId?: string; tabUrl?: string; userAgent?: string };
+    const clientId = body.clientId || `http-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const previous = httpClients.get(clientId);
+    httpClients.set(clientId, {
+      clientId,
+      connectedAt: previous?.connectedAt || new Date().toISOString(),
+      tabUrl: body.tabUrl,
+      userAgent: body.userAgent,
+      lastSeenAt: Date.now()
+    });
+    broadcastState();
+    res.json({ ok: true, clientId, settings });
+  });
   api.post("/posts", (req, res) => {
     const body = req.body as { clientId?: string; posts?: Partial<RadarPost>[]; post?: Partial<RadarPost> };
     addPosts(body.posts || (body.post ? [body.post] : []), body.clientId);
@@ -269,6 +302,15 @@ function startLocalServer(): void {
     socket.send(JSON.stringify({ type: "settings_updated", payload: settings }));
     socket.on("message", (data) => {
       const message = JSON.parse(data.toString()) as BridgeMessage;
+      if (message.type === "extension_connected") {
+        clients.set(socket, {
+          clientId: message.clientId || clientId,
+          connectedAt: new Date().toISOString(),
+          tabUrl: req.url,
+          userAgent: message.payload?.userAgent
+        });
+        broadcastState();
+      }
       if (message.type === "post_collected") addPosts([message.payload], message.clientId || clientId);
       if (message.type === "posts_batch_collected") addPosts(message.payload, message.clientId || clientId);
       if (message.type === "ping") socket.send(JSON.stringify({ type: "pong", clientId }));
