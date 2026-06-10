@@ -100,6 +100,9 @@ async function runExtensionCommand(message) {
     if (commandType === "start_collecting") {
       result = await sendToFacebookTab(message);
       extensionState = result.ok === false ? "error" : "collecting";
+    } else if (commandType === "pause_collecting") {
+      result = await sendToFacebookTab(message);
+      extensionState = result.ok === false ? "error" : "paused";
     } else if (commandType === "stop_collecting") {
       result = await sendToFacebookTab(message);
       extensionState = result.ok === false ? "error" : "stopped";
@@ -141,6 +144,7 @@ async function runExtensionCommand(message) {
 function defaultSuccessMessage(commandType) {
   return {
     start_collecting: "采集已启动，正在监听 Facebook 页面",
+    pause_collecting: "采集已暂停，数据已保留",
     stop_collecting: "采集已停止",
     start_auto_scroll: "自动滚动已启动，正在控制 Facebook 页面滚动",
     stop_auto_scroll: "自动滚动已停止",

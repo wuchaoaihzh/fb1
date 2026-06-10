@@ -100,6 +100,7 @@ export type BridgeMessage =
   | { type: "posts_batch_collected"; clientId: string; payload: Partial<RadarPost>[] }
   | { type: "settings_updated"; payload: RadarSettings }
   | { type: "start_collecting"; commandId?: string }
+  | { type: "pause_collecting"; commandId?: string }
   | { type: "stop_collecting"; commandId?: string }
   | { type: "start_auto_scroll"; commandId?: string; payload: { count: number } }
   | { type: "stop_auto_scroll"; commandId?: string }

@@ -275,7 +275,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === "stop_collecting") {
     collecting = false;
+    autoScrollStopped = true;
     sendResponse({ ok: true, message: "采集已停止", currentState: "stopped" });
+    return true;
+  }
+  if (message.type === "pause_collecting") {
+    collecting = false;
+    autoScrollStopped = true;
+    sendResponse({ ok: true, message: "采集已暂停，数据已保留", currentState: "paused" });
     return true;
   }
   if (message.type === "start_auto_scroll") {
@@ -285,7 +292,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === "stop_auto_scroll") {
     autoScrollStopped = true;
-    sendResponse({ ok: true, message: "自动滚动已停止", currentState: "collecting" });
+    sendResponse({ ok: true, message: "自动滚动已停止", currentState: collecting ? "collecting" : "paused" });
     return true;
   }
   if (message.type === "test_scroll_once") {

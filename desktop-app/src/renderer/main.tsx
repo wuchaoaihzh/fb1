@@ -6,7 +6,8 @@ import { defaultSettings } from "@foradar/shared";
 import "./styles.css";
 
 type KeywordCategory = KeywordItem["category"];
-type OperationLog = { at: string; message: string; level: "info" | "success" | "error" };
+type OperationLog = { at: string; message: string; level: "info" | "success" | "warning" | "error" };
+type SortMode = "recommended" | "score" | "postTime" | "collectedAt" | "alerted" | "unhandled" | "unknown";
 
 interface AppState {
   posts: RadarPost[];
@@ -25,7 +26,7 @@ const stateLabels: Record<CollectionState, string> = {
   paused: "已暂停",
   auto_scrolling: "自动滚动中",
   monitoring: "群组监控中",
-  error: "异常"
+  error: "错误"
 };
 
 function createKeyword(text: string, category: KeywordCategory): KeywordItem {
@@ -44,23 +45,29 @@ function createGroup(url: string): GroupMonitorItem {
   };
 }
 
-function playBeep(): void {
+function isFacebookGroupUrl(value: string): boolean {
   try {
-    const context = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = 880;
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.25, context.currentTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.5);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.55);
-  } catch (error) {
-    console.warn("AudioContext failed", error);
+    const url = new URL(value);
+    return /(^|\.)facebook\.com$/i.test(url.hostname) && (url.pathname.includes("/groups/") || url.pathname === "/groups/feed/");
+  } catch {
+    return false;
   }
+}
+
+async function playBeep(): Promise<void> {
+  const context = new (window.AudioContext || (window as any).webkitAudioContext)();
+  if (context.state === "suspended") await context.resume();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = "sine";
+  oscillator.frequency.value = 880;
+  gain.gain.setValueAtTime(0.0001, context.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.25, context.currentTime + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.5);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start();
+  oscillator.stop(context.currentTime + 0.55);
 }
 
 function StatCard({ label, value }: { label: string; value: number | string }) {
@@ -68,26 +75,22 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>({
-    posts: [],
-    settings: defaultSettings,
-    collectionState: "stopped",
-    operationLog: [],
-    stats: emptyStats,
-    clients: []
-  });
+  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", operationLog: [], stats: emptyStats, clients: [] });
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
   const [monitorInterval, setMonitorInterval] = useState(60);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "new" | "alerted" | "unknown">("all");
+  const [sortMode, setSortMode] = useState<SortMode>("recommended");
+  const [translationEnabled, setTranslationEnabled] = useState(false);
   const [keywordOpen, setKeywordOpen] = useState(false);
   const [keywordCategory, setKeywordCategory] = useState<KeywordCategory>("highValue");
   const [newKeyword, setNewKeyword] = useState("");
   const [importText, setImportText] = useState("");
   const [groupUrl, setGroupUrl] = useState("");
   const [toast, setToast] = useState("");
+  const [flashUi, setFlashUi] = useState(false);
   const [selectedPost, setSelectedPost] = useState<RadarPost | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -122,7 +125,21 @@ function App() {
   }, []);
 
   useEffect(() => {
-    window.radarApi?.onAlertSound(playBeep);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedPost(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    window.radarApi?.onAlertSound(async () => {
+      try {
+        await playBeep();
+      } catch (error) {
+        window.radarApi?.command("ui-log", `声音播放失败：${String(error)}`);
+      }
+    });
   }, []);
 
   const notify = (message: string) => {
@@ -137,28 +154,38 @@ function App() {
     return result;
   };
 
+  const commitSettings = async (nextSettings: RadarSettings, message: string) => {
+    setDraftSettings(nextSettings);
+    await command("update-settings", nextSettings, message);
+  };
+
   const updateSettings = (updater: (settings: RadarSettings) => RadarSettings) => {
     setDraftSettings((settings) => updater(structuredClone(settings)));
   };
 
   const saveSettings = async () => {
-    const nextSettings = { ...draftSettings, autoScroll: { ...draftSettings.autoScroll, defaultScrollCount: scrollCount }, groupMonitor: { ...draftSettings.groupMonitor, defaultIntervalSeconds: monitorInterval as 30 | 60 | 180 | 300 } };
-    setDraftSettings(nextSettings);
-    await command("update-settings", nextSettings, "设置已保存到本地配置文件");
+    await commitSettings({ ...draftSettings, autoScroll: { ...draftSettings.autoScroll, defaultScrollCount: scrollCount }, groupMonitor: { ...draftSettings.groupMonitor, defaultIntervalSeconds: monitorInterval as 30 | 60 | 180 | 300 } }, "设置已保存到本地配置文件");
   };
 
   const posts = useMemo(() => {
-    return state.posts
-      .filter((post) => !post.ignored)
-      .filter((post) => {
-        if (filter === "new" && !post.isNewPost) return false;
-        if (filter === "alerted" && !post.alertTriggered) return false;
-        if (filter === "unknown" && post.timeConfidence !== "unknown") return false;
-        const text = `${post.groupName} ${post.postText} ${post.matchedKeywords.join(" ")}`.toLowerCase();
-        return text.includes(query.toLowerCase());
-      })
-      .sort((a, b) => b.collectedAt.localeCompare(a.collectedAt));
-  }, [filter, query, state.posts]);
+    const filtered = state.posts.filter((post) => !post.ignored).filter((post) => {
+      if (filter === "new" && !post.isNewPost) return false;
+      if (filter === "alerted" && !post.alertTriggered) return false;
+      if (filter === "unknown" && post.timeConfidence !== "unknown") return false;
+      const text = `${post.groupName} ${post.postText} ${post.matchedKeywords.join(" ")}`.toLowerCase();
+      return text.includes(query.toLowerCase());
+    });
+
+    return filtered.sort((a, b) => {
+      if (sortMode === "score") return b.score - a.score;
+      if (sortMode === "postTime") return (b.parsedPostTime || b.rawTimeText).localeCompare(a.parsedPostTime || a.rawTimeText);
+      if (sortMode === "collectedAt") return b.collectedAt.localeCompare(a.collectedAt);
+      if (sortMode === "alerted") return Number(b.alertTriggered) - Number(a.alertTriggered);
+      if (sortMode === "unhandled") return Number(a.handled || false) - Number(b.handled || false);
+      if (sortMode === "unknown") return Number(b.timeConfidence === "unknown") - Number(a.timeConfidence === "unknown");
+      return (Number(b.alertTriggered) - Number(a.alertTriggered)) || (Number(b.isNewPost) - Number(a.isNewPost)) || (b.score - a.score) || b.collectedAt.localeCompare(a.collectedAt);
+    });
+  }, [filter, query, sortMode, state.posts]);
 
   const addKeyword = () => {
     const text = newKeyword.trim();
@@ -181,25 +208,76 @@ function App() {
     link.download = "opportunity-radar-keywords.json";
     link.click();
     URL.revokeObjectURL(url);
+    command("ui-log", "关键词 JSON 已导出");
   };
 
   const loadKeywordFile = async (file?: File) => {
     if (!file) return;
     const parsed = JSON.parse(await file.text()) as KeywordItem[];
     updateSettings((settings) => ({ ...settings, keywords: parsed }));
+    command("ui-log", `关键词已从 JSON 导入：${parsed.length} 条`);
   };
 
-  const addGroup = () => {
-    if (!groupUrl.trim()) return;
-    updateSettings((settings) => ({ ...settings, groupMonitor: { ...settings.groupMonitor, groups: [...settings.groupMonitor.groups, createGroup(groupUrl.trim())] } }));
-    command("ui-log", `已添加群组链接：${groupUrl.trim()}`);
+  const addGroup = async () => {
+    const url = groupUrl.trim();
+    if (!isFacebookGroupUrl(url)) {
+      notify("请输入有效的 Facebook 群组链接");
+      await command("ui-log", `保存群组失败：无效链接 ${url}`);
+      return;
+    }
+    const nextSettings = { ...draftSettings, groupMonitor: { ...draftSettings.groupMonitor, groups: [...draftSettings.groupMonitor.groups, createGroup(url)] } };
+    await commitSettings(nextSettings, "群组已保存");
     setGroupUrl("");
+  };
+
+  const deleteGroup = async (id: string) => {
+    const nextSettings = { ...draftSettings, groupMonitor: { ...draftSettings.groupMonitor, groups: draftSettings.groupMonitor.groups.filter((group) => group.id !== id) } };
+    await commitSettings(nextSettings, "群组已删除");
+  };
+
+  const updateGroup = (id: string, updater: (group: GroupMonitorItem) => GroupMonitorItem) => {
+    updateSettings((settings) => ({ ...settings, groupMonitor: { ...settings.groupMonitor, groups: settings.groupMonitor.groups.map((group) => group.id === id ? updater(group) : group) } }));
+  };
+
+  const clearData = async () => {
+    if (!window.confirm("是否确认清空当前采集数据？")) {
+      await command("ui-log", "清空数据已取消");
+      return;
+    }
+    await command("clear", undefined, "正在清空数据");
+  };
+
+  const testSound = async () => {
+    try {
+      await playBeep();
+      await command("ui-log", "声音提醒测试成功");
+      notify("声音提醒测试成功");
+    } catch (error) {
+      await command("ui-log", `声音播放失败：${String(error)}`);
+      notify("声音播放失败，请查看运行日志");
+    }
+  };
+
+  const testFlash = async () => {
+    setFlashUi(true);
+    setTimeout(() => setFlashUi(false), 3500);
+    await command("test-flash", undefined, "窗口闪动测试已触发");
+  };
+
+  const toggleTranslation = async () => {
+    if (!translationEnabled) {
+      notify("翻译接口未配置，请先在设置中填写 API Key");
+      await command("ui-log", "实时翻译未开启：翻译 API 未配置");
+      return;
+    }
+    setTranslationEnabled(false);
+    await command("ui-log", "实时翻译已关闭");
   };
 
   const connectionHint = state.stats.connectedClients === 0 ? "插件未连接，请确认浏览器插件已安装并打开 Facebook 页面" : "插件已连接，等待 Facebook 页面命令确认";
 
   return (
-    <main>
+    <main className={flashUi ? "flash-ui" : ""}>
       {toast && <div className="toast">{toast}</div>}
       <header className="topbar">
         <div>
@@ -226,14 +304,15 @@ function App() {
         <button onClick={() => command("diagnose", undefined, "连接诊断命令已发送")}><Radio size={16} />测试连接</button>
         <button onClick={() => command("test-collect", undefined, "测试采集一次命令已发送")}><Search size={16} />测试采集一次</button>
         <button onClick={() => command("test-scroll", undefined, "测试滚动一次命令已发送")}><Zap size={16} />测试滚动一次</button>
-        <button onClick={() => command("clear")}><Trash2 size={16} />清空数据</button>
+        <button onClick={clearData}><Trash2 size={16} />清空数据</button>
         <button onClick={() => command("export-xlsx")}><FileSpreadsheet size={16} />导出 Excel</button>
         <button onClick={() => command("export-csv")}><Download size={16} />导出 CSV</button>
         <button onClick={() => command("open-data-dir")}><FolderOpen size={16} />数据目录</button>
         <button onClick={() => command("open-log-folder")}><FolderOpen size={16} />日志文件夹</button>
         <button onClick={() => command("clear-logs")}><Trash2 size={16} />清空日志</button>
-        <button onClick={() => command("test-sound")}><Volume2 size={16} />测试声音</button>
-        <button onClick={() => command("test-flash")}><Bell size={16} />测试闪动</button>
+        <button onClick={testSound}><Volume2 size={16} />测试声音</button>
+        <button onClick={testFlash}><Bell size={16} />测试闪动</button>
+        <button onClick={toggleTranslation}><Download size={16} />实时翻译：{translationEnabled ? "开启" : "关闭"}</button>
       </section>
 
       <section className="split">
@@ -242,14 +321,14 @@ function App() {
           <div className="segmented">{[3, 5, 8, 10, 999].map((count) => <button className={scrollCount === count ? "active" : ""} key={count} onClick={() => setScrollCount(count)}>{count === 999 ? "长时间" : count}</button>)}</div>
           <label className="field"><span>滚动次数</span><input min="1" max="999" type="number" value={scrollCount} onChange={(event) => setScrollCount(Number(event.target.value))} /></label>
           <div className="inline-actions">
-            <button onClick={() => command("start-auto-scroll", { count: scrollCount }, `自动滚动已启动，当前滑动次数：0 / ${scrollCount}`)}><Zap size={16} />开始自动滚动</button>
+            <button onClick={() => command("start-auto-scroll", { count: scrollCount }, `自动滚动命令已发送：0 / ${scrollCount}`)}><Zap size={16} />开始自动滚动</button>
             <button onClick={() => command("stop-auto-scroll", undefined, "自动滚动停止命令已发送")}><Pause size={16} />停止自动滚动</button>
           </div>
         </div>
         <div className="panel">
-          <div className="panel-head"><h2>最后一次操作结果</h2><span>{state.operationLog[0]?.at || "等待操作"}</span></div>
+          <div className="panel-head"><h2>运行日志</h2><span>{state.operationLog[0]?.at || "等待操作"}</span></div>
           <div className="operation-log">
-            {(state.operationLog.length ? state.operationLog : [{ at: "--", message: "还没有操作记录", level: "info" as const }]).slice(0, 8).map((item, index) => (
+            {(state.operationLog.length ? state.operationLog : [{ at: "--", message: "还没有操作记录", level: "info" as const }]).slice(0, 12).map((item, index) => (
               <div className={`log-line ${item.level}`} key={`${item.at}-${index}`}><span>{item.at}</span>{item.message}</div>
             ))}
           </div>
@@ -257,34 +336,43 @@ function App() {
       </section>
 
       <section className="panel monitor-panel">
-        <div className="panel-head"><h2>群组监控</h2><span>只监控已打开、当前账号可访问的 Facebook 群组页面</span></div>
+        <div className="panel-head"><h2>群组监控</h2><span>第一阶段只监控已经打开的 Facebook 群组页面</span></div>
         <div className="monitor-tools">
-          <input value={groupUrl} placeholder="添加已加入群组链接" onChange={(event) => setGroupUrl(event.target.value)} />
-          <button onClick={addGroup}><Plus size={16} />添加群组</button>
+          <input value={groupUrl} placeholder="添加已加入群组链接，如 https://www.facebook.com/groups/xxx" onChange={(event) => setGroupUrl(event.target.value)} />
+          <button onClick={addGroup}><Plus size={16} />添加并保存群组</button>
           <select value={monitorInterval} onChange={(event) => setMonitorInterval(Number(event.target.value))}><option value={30}>30 秒</option><option value={60}>1 分钟</option><option value={180}>3 分钟</option><option value={300}>5 分钟</option></select>
           <button onClick={() => command("start-group-monitor", { intervalSeconds: monitorInterval }, "群组监控启动命令已发送")}><Play size={16} />开始监控已打开页面</button>
           <button onClick={() => command("stop-group-monitor", undefined, "群组监控停止命令已发送")}><Square size={16} />停止监控</button>
           <button onClick={saveSettings}><Save size={16} />保存群组</button>
         </div>
         <div className="monitor-list">
-          {draftSettings.groupMonitor.groups.length === 0 && <div className="empty slim">还没有添加群组链接。第一阶段可直接打开群组页面后启动监控。</div>}
+          {draftSettings.groupMonitor.groups.length === 0 && <div className="empty slim">还没有添加群组链接。也可以直接打开 groups/feed 或单个群组页面后启动监控。</div>}
           {draftSettings.groupMonitor.groups.map((group) => (
             <div className="monitor-row" key={group.id}>
-              <input type="checkbox" checked={group.enabled} onChange={(event) => updateSettings((settings) => ({ ...settings, groupMonitor: { ...settings.groupMonitor, groups: settings.groupMonitor.groups.map((item) => item.id === group.id ? { ...item, enabled: event.target.checked } : item) } }))} />
-              <input value={group.name} onChange={(event) => updateSettings((settings) => ({ ...settings, groupMonitor: { ...settings.groupMonitor, groups: settings.groupMonitor.groups.map((item) => item.id === group.id ? { ...item, name: event.target.value } : item) } }))} />
+              <input type="checkbox" checked={group.enabled} onChange={(event) => updateGroup(group.id, (item) => ({ ...item, enabled: event.target.checked }))} />
+              <input value={group.name} onChange={(event) => updateGroup(group.id, (item) => ({ ...item, name: event.target.value }))} />
               <span>{group.status === "not_open" ? "未打开" : group.status}</span>
               <span>{group.lastCheckedAt || "尚未检查"}</span>
-              <button onClick={() => updateSettings((settings) => ({ ...settings, groupMonitor: { ...settings.groupMonitor, groups: settings.groupMonitor.groups.filter((item) => item.id !== group.id) } }))}><Trash2 size={16} /></button>
+              <button onClick={() => deleteGroup(group.id)}><Trash2 size={16} /></button>
             </div>
           ))}
         </div>
       </section>
 
       <section className="panel posts-panel">
-        <div className="panel-head"><h2>实时帖子列表</h2><div className="filters"><div className="search"><Search size={16} /><input placeholder="搜索内容、群组、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}><option value="all">全部</option><option value="new">只看新帖</option><option value="alerted">只看已提醒</option><option value="unknown">时间未识别</option></select></div></div>
-        <div className="table-wrap"><table><thead><tr><th>提醒状态</th><th>评分</th><th>新帖</th><th>群组名称</th><th>发布时间</th><th>内容摘要</th><th>匹配关键词</th><th>来源窗口</th><th>操作</th></tr></thead><tbody>
-          {posts.map((post) => <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""}><td>{post.alertTriggered ? "已提醒" : post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td><td>{post.postTextPreview}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.sourceWindowId}</td><td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button title="复制链接" onClick={() => { navigator.clipboard.writeText(post.postUrl); command("ui-log", `已复制帖子链接：${post.postUrl}`); notify("链接已复制"); }}><Copy size={15} /></button><button onClick={() => command("mark-handled", post.postId)}>已处理</button><button onClick={() => command("ignore-post", post.postId)}>忽略</button><button onClick={() => { setSelectedPost(post); command("ui-log", `查看帖子详情：${post.postUrl || post.postId}`); }}>详情</button></td></tr>)}
-          {posts.length === 0 && <tr><td colSpan={9} className="empty">等待插件发送帖子。请打开 Facebook 群组页面后点击“测试连接”或“开始采集”。</td></tr>}
+        <div className="panel-head">
+          <h2>实时帖子列表</h2>
+          <div className="filters">
+            <div className="search"><Search size={16} /><input placeholder="搜索内容、群组、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+            <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)}>
+              <option value="recommended">综合推荐</option><option value="score">评分最高</option><option value="postTime">发布时间最新</option><option value="collectedAt">采集时间最新</option><option value="alerted">仅看已提醒</option><option value="unhandled">仅看未处理</option><option value="unknown">仅看时间未识别</option>
+            </select>
+            <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}><option value="all">全部</option><option value="new">只看新帖</option><option value="alerted">只看已提醒</option><option value="unknown">时间未识别</option></select>
+          </div>
+        </div>
+        <div className="table-wrap"><table><thead><tr><th>提醒状态</th><th>评分</th><th>新帖</th><th>群组名称</th><th>发布时间</th><th>内容摘要</th><th>中文翻译</th><th>匹配关键词</th><th>来源窗口</th><th>操作</th></tr></thead><tbody>
+          {posts.map((post) => <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""}><td>{post.alertTriggered ? "已提醒" : post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td><td>{post.postTextPreview}</td><td>{translationEnabled ? "翻译中..." : "未开启"}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.sourceWindowId}</td><td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button title="复制链接" onClick={() => { navigator.clipboard.writeText(post.postUrl); command("ui-log", `已复制帖子链接：${post.postUrl}`); notify("链接已复制"); }}><Copy size={15} /></button><button onClick={() => command("mark-handled", post.postId)}>已处理</button><button onClick={() => command("ignore-post", post.postId)}>忽略</button><button onClick={() => { setSelectedPost(post); command("ui-log", `查看帖子详情：${post.postUrl || post.postId}`); }}>详情</button></td></tr>)}
+          {posts.length === 0 && <tr><td colSpan={10} className="empty">等待插件发送帖子。请打开 Facebook 群组页面后点击“测试连接”或“开始采集”。</td></tr>}
         </tbody></table></div>
       </section>
 
@@ -298,7 +386,7 @@ function App() {
         </>}
       </section>
 
-      {selectedPost && <aside className="drawer"><button className="close" onClick={() => setSelectedPost(null)}>关闭</button><h2>帖子详情</h2><dl><dt>完整内容</dt><dd>{selectedPost.postText}</dd><dt>链接</dt><dd>{selectedPost.postUrl}</dd><dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd><dt>群组</dt><dd>{selectedPost.groupName}</dd><dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd><dt>评分原因</dt><dd>{selectedPost.scoreReasons.join("；") || "无"}</dd><dt>状态备注</dt><dd>{selectedPost.statusNote}</dd></dl></aside>}
+      {selectedPost && <div className="modal-backdrop" onClick={() => setSelectedPost(null)}><aside className="modal" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setSelectedPost(null)}>X</button><h2>帖子详情</h2><dl><dt>完整内容</dt><dd>{selectedPost.postText}</dd><dt>中文翻译</dt><dd>{translationEnabled ? "翻译接口未配置" : "实时翻译未开启"}</dd><dt>群组</dt><dd>{selectedPost.groupName}</dd><dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd><dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd><dt>解析时间</dt><dd>{selectedPost.parsedPostTime}</dd><dt>评分</dt><dd>{selectedPost.score}</dd><dt>匹配关键词</dt><dd>{selectedPost.matchedKeywords.join(", ") || "无"}</dd><dt>排除关键词</dt><dd>{selectedPost.negativeKeywords.join(", ") || "无"}</dd><dt>评分原因</dt><dd>{selectedPost.scoreReasons.join("；") || "无"}</dd><dt>链接</dt><dd>{selectedPost.postUrl}</dd></dl><div className="inline-actions"><button onClick={() => command("open-url", selectedPost.postUrl)}>打开帖子</button><button onClick={() => { navigator.clipboard.writeText(selectedPost.postUrl); command("ui-log", `已复制帖子链接：${selectedPost.postUrl}`); }}>复制链接</button><button onClick={() => command("mark-handled", selectedPost.postId)}>标记已处理</button></div></aside></div>}
     </main>
   );
 }

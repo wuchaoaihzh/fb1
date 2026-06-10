@@ -41,7 +41,7 @@ const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
 
 function operationLogFile(): string {
-  return path.join(dataDir(), "operation.log");
+  return path.join(dataDir(), "logs", "operation.log");
 }
 
 function addOperation(message: string, level: OperationLevel = "info"): void {
@@ -84,6 +84,7 @@ function commandId(): string {
 function dataDir(): string {
   const dir = path.join(app.getPath("userData"), "data");
   fs.mkdirSync(dir, { recursive: true });
+  ["exports", "logs", "config", "groups", "history"].forEach((name) => fs.mkdirSync(path.join(dir, name), { recursive: true }));
   return dir;
 }
 
@@ -97,17 +98,22 @@ function log(message: string, details?: unknown): void {
 }
 
 function settingsFile(): string {
-  return path.join(dataDir(), "settings.json");
+  return path.join(dataDir(), "config", "settings.json");
 }
 
 function postsFile(): string {
-  return path.join(dataDir(), "posts.json");
+  return path.join(dataDir(), "history", "posts.json");
+}
+
+function firstExistingFile(paths: string[]): string | undefined {
+  return paths.find((file) => fs.existsSync(file));
 }
 
 function loadPersistedData(): void {
   try {
-    if (fs.existsSync(settingsFile())) {
-      const saved = JSON.parse(fs.readFileSync(settingsFile(), "utf8")) as Partial<RadarSettings>;
+    const savedSettingsFile = firstExistingFile([settingsFile(), path.join(dataDir(), "settings.json")]);
+    if (savedSettingsFile) {
+      const saved = JSON.parse(fs.readFileSync(savedSettingsFile, "utf8")) as Partial<RadarSettings>;
       settings = {
         ...defaultSettings,
         ...saved,
@@ -116,8 +122,9 @@ function loadPersistedData(): void {
         groupMonitor: { ...defaultSettings.groupMonitor, ...saved.groupMonitor }
       };
     }
-    if (fs.existsSync(postsFile())) {
-      const saved = JSON.parse(fs.readFileSync(postsFile(), "utf8")) as RadarPost[];
+    const savedPostsFile = firstExistingFile([postsFile(), path.join(dataDir(), "posts.json")]);
+    if (savedPostsFile) {
+      const saved = JSON.parse(fs.readFileSync(savedPostsFile, "utf8")) as RadarPost[];
       saved.forEach((post) => posts.set(dedupeKey(post), post));
     }
   } catch (error) {
@@ -334,7 +341,7 @@ function exportRows() {
 
 function timestampName(ext: string): string {
   const stamp = formatLocalDateTime(new Date()).replace(/:/g, "-").replace(" ", "_");
-  return path.join(dataDir(), `facebook_posts_${stamp}.${ext}`);
+  return path.join(dataDir(), "exports", `facebook_posts_${stamp}.${ext}`);
 }
 
 async function exportCsv(): Promise<string> {
@@ -457,15 +464,16 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     return sendCommand("start_collecting");
   }
   if (command === "pause") {
-    return sendCommand("stop_collecting");
+    return sendCommand("pause_collecting");
   }
   if (command === "stop") {
     return sendCommand("stop_collecting");
   }
   if (command === "clear") {
+    const count = posts.size;
     posts.clear();
     persistPosts();
-    addOperation("数据已清空", "success");
+    addOperation(`数据已清空，共清空 ${count} 条帖子`, "success");
   }
   if (command === "mark-handled" && typeof payload === "string") {
     const post = [...posts.values()].find((item) => item.postId === payload);
@@ -494,12 +502,14 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     addOperation("窗口闪动测试已触发", "success");
   }
   if (command === "open-data-dir") {
-    await shell.openPath(dataDir());
-    addOperation(`已打开数据目录：${dataDir()}`, "success");
+    const result = await shell.openPath(dataDir());
+    if (result) addOperation(`打开数据目录失败：${result}`, "error");
+    else addOperation(`已打开数据目录：${dataDir()}`, "success");
   }
   if (command === "open-log-folder") {
-    await shell.openPath(dataDir());
-    addOperation(`已打开日志文件夹：${dataDir()}`, "success");
+    const result = await shell.openPath(path.dirname(operationLogFile()));
+    if (result) addOperation(`打开日志文件夹失败：${result}`, "error");
+    else addOperation(`已打开日志文件夹：${path.dirname(operationLogFile())}`, "success");
   }
   if (command === "clear-logs") {
     operationLog.splice(0);
@@ -524,8 +534,16 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     return file;
   }
   if (command === "update-settings") {
-    settings = { ...defaultSettings, ...(payload as RadarSettings) };
+    const incoming = payload as RadarSettings;
+    settings = {
+      ...defaultSettings,
+      ...incoming,
+      alerts: { ...defaultSettings.alerts, ...incoming.alerts },
+      autoScroll: { ...defaultSettings.autoScroll, ...incoming.autoScroll },
+      groupMonitor: { ...defaultSettings.groupMonitor, ...incoming.groupMonitor }
+    };
     persistSettings();
+    addOperation(`设置已保存；群组数量：${settings.groupMonitor.groups.length}`, "success");
     broadcastToExtensions({ type: "settings_updated", payload: settings });
   }
   if (command === "start-auto-scroll") return sendCommand("start_auto_scroll", payload as { count: number });

@@ -25,6 +25,15 @@ main {
   padding: 22px;
 }
 
+.flash-ui .topbar {
+  animation: flashPulse 0.45s ease-in-out 7;
+}
+
+@keyframes flashPulse {
+  0%, 100% { background: transparent; }
+  50% { background: #fff2a8; }
+}
+
 .toast {
   position: fixed;
   right: 22px;
@@ -406,7 +415,7 @@ textarea {
 
 table {
   width: 100%;
-  min-width: 1360px;
+  min-width: 1500px;
   border-collapse: collapse;
 }
 
@@ -456,21 +465,38 @@ td:nth-child(5) {
   padding: 6px 8px;
 }
 
-.drawer {
+.modal-backdrop {
   position: fixed;
-  right: 0;
   top: 0;
-  width: min(460px, 100vw);
-  height: 100vh;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  background: rgba(15, 25, 30, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+}
+
+.modal {
+  position: relative;
+  width: min(720px, 96vw);
+  max-height: min(760px, 92vh);
   background: #ffffff;
-  border-left: 1px solid #cfdad5;
-  box-shadow: -8px 0 24px rgba(20, 35, 30, 0.16);
+  border: 1px solid #cfdad5;
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(10, 20, 18, 0.28);
   padding: 22px;
   overflow: auto;
 }
 
-.drawer .close {
-  float: right;
+.modal .close {
+  position: absolute;
+  right: 14px;
+  top: 12px;
+  min-width: 34px;
+  padding: 5px 9px;
 }
 
 dl {
