@@ -5,3 +5,4 @@ release/
 *.bak
 *.tmp
 *.tsbuildinfo
+* - *.*
