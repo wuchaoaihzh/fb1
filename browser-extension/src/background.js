@@ -1,20 +1,66 @@
 const LOCAL_WS = "ws://127.0.0.1:8765";
+const LOCAL_HEALTH = "http://127.0.0.1:8765/health";
 let socket = null;
 let clientId = `ext-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 let connected = false;
 let latestSettings = null;
+let reconnectTimer = null;
+let heartbeatTimer = null;
 
 function setConnected(value) {
   connected = value;
   chrome.storage.local.set({ connected, clientId, lastStatusAt: Date.now() });
 }
 
-function connect() {
+function scheduleReconnect(delay = 2500) {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delay);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      stopHeartbeat();
+      scheduleReconnect();
+      return;
+    }
+    socket.send(JSON.stringify({ type: "ping", clientId }));
+  }, 20000);
+}
+
+async function isDesktopAvailable() {
+  try {
+    const response = await fetch(LOCAL_HEALTH, { cache: "no-store" });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function connect() {
   if (socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(socket.readyState)) return;
+  if (!(await isDesktopAvailable())) {
+    setConnected(false);
+    scheduleReconnect();
+    return;
+  }
+
   socket = new WebSocket(LOCAL_WS);
 
   socket.addEventListener("open", () => {
     setConnected(true);
+    startHeartbeat();
     socket.send(JSON.stringify({ type: "extension_connected", clientId, payload: { userAgent: navigator.userAgent } }));
   });
 
@@ -36,11 +82,13 @@ function connect() {
 
   socket.addEventListener("close", () => {
     setConnected(false);
-    setTimeout(connect, 2500);
+    stopHeartbeat();
+    scheduleReconnect();
   });
 
   socket.addEventListener("error", () => {
     setConnected(false);
+    socket?.close();
   });
 }
 
