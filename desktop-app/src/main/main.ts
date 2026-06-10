@@ -30,6 +30,7 @@ let collectionState: "collecting" | "paused" | "stopped" = "stopped";
 const posts = new Map<string, RadarPost>();
 const clients = new Map<WebSocket, ExtensionClientInfo>();
 const httpClients = new Map<string, ExtensionClientInfo & { lastSeenAt: number }>();
+const commandQueues = new Map<string, BridgeMessage[]>();
 const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
 
@@ -133,6 +134,11 @@ function broadcastToExtensions(message: BridgeMessage): void {
   const serialized = JSON.stringify(message);
   clients.forEach((_, socket) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(serialized);
+  });
+  activeHttpClients().forEach((client) => {
+    const queue = commandQueues.get(client.clientId) || [];
+    queue.push(message);
+    commandQueues.set(client.clientId, queue.slice(-20));
   });
 }
 
@@ -272,8 +278,10 @@ function startLocalServer(): void {
       userAgent: body.userAgent,
       lastSeenAt: Date.now()
     });
+    const commands = commandQueues.get(clientId) || [];
+    commandQueues.set(clientId, []);
     broadcastState();
-    res.json({ ok: true, clientId, settings });
+    res.json({ ok: true, clientId, settings, commands });
   });
   api.post("/posts", (req, res) => {
     const body = req.body as { clientId?: string; posts?: Partial<RadarPost>[]; post?: Partial<RadarPost> };

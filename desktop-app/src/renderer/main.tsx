@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Bell,
@@ -8,28 +8,22 @@ import {
   FolderOpen,
   Pause,
   Play,
+  Plus,
   Radio,
+  Save,
   Search,
   Square,
   Trash2,
+  Upload,
   Volume2,
   Zap
 } from "lucide-react";
-import type { ExtensionClientInfo, RadarPost, RadarSettings, RadarStats } from "@foradar/shared";
+import type { ExtensionClientInfo, KeywordItem, RadarPost, RadarSettings, RadarStats } from "@foradar/shared";
 import { defaultSettings } from "@foradar/shared";
 import "./styles.css";
 
-// ==================== 类型声明 ====================
-declare global {
-  interface Window {
-    radarApi?: {
-      onAlertSound: (callback: () => void) => void;
-      command: (name: string, payload?: unknown) => void;
-    };
-  }
-}
-
 type CollectionState = "collecting" | "paused" | "stopped";
+type KeywordCategory = KeywordItem["category"];
 
 interface AppState {
   posts: RadarPost[];
@@ -48,7 +42,21 @@ const emptyStats: RadarStats = {
   connectedClients: 0
 };
 
-// ==================== 辅助函数 ====================
+const categoryLabels: Record<KeywordCategory, string> = {
+  highValue: "高价值关键词",
+  normal: "普通关键词",
+  negative: "排除关键词"
+};
+
+function createKeyword(text: string, category: KeywordCategory): KeywordItem {
+  return {
+    id: `${category}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    text: text.trim(),
+    category,
+    enabled: true
+  };
+}
+
 function playBeep(): void {
   try {
     const context = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -63,8 +71,8 @@ function playBeep(): void {
     gain.connect(context.destination);
     oscillator.start();
     oscillator.stop(context.currentTime + 0.55);
-  } catch (e) {
-    console.warn("AudioContext failed", e);
+  } catch (error) {
+    console.warn("AudioContext failed", error);
   }
 }
 
@@ -77,7 +85,6 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
   );
 }
 
-// ==================== 主组件 ====================
 function App() {
   const [state, setState] = useState<AppState>({
     posts: [],
@@ -86,79 +93,55 @@ function App() {
     stats: emptyStats,
     clients: []
   });
+  const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
-  const [scrollCount, setScrollCount] = useState(5);
+  const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "new" | "alerted" | "unknown">("all");
+  const [keywordCategory, setKeywordCategory] = useState<KeywordCategory>("highValue");
+  const [newKeyword, setNewKeyword] = useState("");
+  const [importText, setImportText] = useState("");
   const [selectedPost, setSelectedPost] = useState<RadarPost | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // WebSocket 连接（带自动重连）
   useEffect(() => {
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
       socket = new WebSocket("ws://127.0.0.1:8765?role=renderer");
-
-      socket.addEventListener("open", () => {
-        setSocketReady(true);
-        console.log("WebSocket connected");
-      });
-
+      socket.addEventListener("open", () => setSocketReady(true));
       socket.addEventListener("message", (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          if (message.type === "state") {
-            setState((prev) => ({ ...prev, ...message.payload }));
-          }
-        } catch (err) {
-          console.error("Failed to parse WebSocket message", err);
+        const message = JSON.parse(event.data);
+        if (message.type === "state") {
+          setState((previous) => ({ ...previous, ...message.payload }));
+          setDraftSettings(message.payload.settings);
+          setScrollCount(message.payload.settings.autoScroll.defaultScrollCount);
         }
       });
-
       socket.addEventListener("close", () => {
         setSocketReady(false);
-        console.log("WebSocket disconnected, reconnecting in 1s...");
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 1000);
       });
-
-      socket.addEventListener("error", (err) => {
-        console.error("WebSocket error", err);
-        socket?.close();
-      });
+      socket.addEventListener("error", () => socket?.close());
     };
 
     connect();
-
     return () => {
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (socket) {
-        socket.close();
-        socket = null;
-      }
+      socket?.close();
     };
-  }, []); // 只在挂载时执行一次
-
-  // 注册声音提醒回调（如果 Electron API 可用）
-  useEffect(() => {
-    if (window.radarApi && typeof window.radarApi.onAlertSound === "function") {
-      window.radarApi.onAlertSound(playBeep);
-    } else {
-      console.warn("radarApi not available, sound alerts disabled");
-    }
   }, []);
 
-  // 发送命令的包装函数（防御性）
-  const command = (name: string, payload?: unknown) => {
-    if (window.radarApi?.command) {
-      window.radarApi.command(name, payload);
-    } else {
-      console.warn(`radarApi.command("${name}") 不可用`);
-    }
+  useEffect(() => {
+    window.radarApi?.onAlertSound(playBeep);
+  }, []);
+
+  const command = async (name: string, payload?: unknown) => {
+    await window.radarApi?.command(name, payload);
   };
 
-  // 过滤帖子
   const posts = useMemo(() => {
     return state.posts.filter((post) => {
       if (filter === "new" && !post.isNewPost) return false;
@@ -169,12 +152,69 @@ function App() {
     });
   }, [filter, query, state.posts]);
 
+  const keywordsByCategory = useMemo(() => {
+    return draftSettings.keywords.filter((keyword) => keyword.category === keywordCategory);
+  }, [draftSettings.keywords, keywordCategory]);
+
+  const updateSettings = (updater: (settings: RadarSettings) => RadarSettings) => {
+    setDraftSettings((settings) => updater(structuredClone(settings)));
+  };
+
+  const addKeyword = () => {
+    const text = newKeyword.trim();
+    if (!text) return;
+    updateSettings((settings) => ({
+      ...settings,
+      keywords: [...settings.keywords, createKeyword(text, keywordCategory)]
+    }));
+    setNewKeyword("");
+  };
+
+  const importKeywords = () => {
+    const words = importText.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
+    if (words.length === 0) return;
+    updateSettings((settings) => ({
+      ...settings,
+      keywords: [...settings.keywords, ...words.map((word) => createKeyword(word, keywordCategory))]
+    }));
+    setImportText("");
+  };
+
+  const exportKeywords = () => {
+    const blob = new Blob([JSON.stringify(draftSettings.keywords, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "opportunity-radar-keywords.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const loadKeywordFile = async (file?: File) => {
+    if (!file) return;
+    const text = await file.text();
+    const parsed = JSON.parse(text) as KeywordItem[];
+    updateSettings((settings) => ({
+      ...settings,
+      keywords: parsed.map((keyword) => ({ ...keyword, id: keyword.id || createKeyword(keyword.text, keyword.category).id }))
+    }));
+  };
+
+  const saveSettings = async () => {
+    const nextSettings = {
+      ...draftSettings,
+      autoScroll: { ...draftSettings.autoScroll, defaultScrollCount: scrollCount }
+    };
+    setDraftSettings(nextSettings);
+    await command("update-settings", nextSettings);
+  };
+
   return (
     <main>
       <header className="topbar">
         <div>
           <h1>Facebook Opportunity Radar</h1>
-          <p>采集当前可见帖子，筛选采购需求，提醒后由你人工打开 Facebook 处理。</p>
+          <p>采集当前可见帖子，按关键词和时间评分，筛选潜在采购需求。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}>
           <Radio size={18} />
@@ -186,7 +226,7 @@ function App() {
         <div className="panel compact">
           <h2>插件连接</h2>
           <strong>{state.stats.connectedClients > 0 ? "插件已连接" : "插件未连接"}</strong>
-          <span>当前连接窗口数：{state.stats.connectedClients}</span>
+          <span>当前连接数：{state.stats.connectedClients}</span>
         </div>
         <div className="panel compact">
           <h2>采集状态</h2>
@@ -221,7 +261,7 @@ function App() {
           <div className="segmented">
             {[3, 5, 8, 10, 999].map((count) => (
               <button className={scrollCount === count ? "active" : ""} key={count} onClick={() => setScrollCount(count)}>
-                {count === 999 ? "长时间模式" : count}
+                {count === 999 ? "长时间" : count}
               </button>
             ))}
           </div>
@@ -238,14 +278,51 @@ function App() {
         <div className="panel">
           <div className="panel-head">
             <h2>提醒规则</h2>
-            <span>{state.settings.alerts.minimumScore} 分起提醒</span>
+            <span>{draftSettings.alerts.minimumScore} 分起提醒</span>
           </div>
-          <div className="rule-grid">
-            <span>新帖范围</span><strong>{state.settings.alerts.newPostMinutes} 分钟内</strong>
-            <span>声音提醒</span><strong>{state.settings.alerts.soundEnabled ? "开启" : "关闭"}</strong>
-            <span>窗口闪动</span><strong>{state.settings.alerts.flashWindowEnabled ? "开启" : "关闭"}</strong>
-            <span>桌面通知</span><strong>{state.settings.alerts.desktopNotificationEnabled ? "开启" : "关闭"}</strong>
+          <div className="settings-grid">
+            <label><span>新帖范围</span><select value={draftSettings.alerts.newPostMinutes} onChange={(event) => updateSettings((settings) => ({ ...settings, alerts: { ...settings.alerts, newPostMinutes: Number(event.target.value) as 1 | 3 | 5 | 10 } }))}><option value={1}>1 分钟</option><option value={3}>3 分钟</option><option value={5}>5 分钟</option><option value={10}>10 分钟</option></select></label>
+            <label><span>最低分数</span><select value={draftSettings.alerts.minimumScore} onChange={(event) => updateSettings((settings) => ({ ...settings, alerts: { ...settings.alerts, minimumScore: Number(event.target.value) as 60 | 70 | 80 } }))}><option value={60}>60</option><option value={70}>70</option><option value={80}>80</option></select></label>
+            <label><input type="checkbox" checked={draftSettings.alerts.soundEnabled} onChange={(event) => updateSettings((settings) => ({ ...settings, alerts: { ...settings.alerts, soundEnabled: event.target.checked } }))} />声音提醒</label>
+            <label><input type="checkbox" checked={draftSettings.alerts.flashWindowEnabled} onChange={(event) => updateSettings((settings) => ({ ...settings, alerts: { ...settings.alerts, flashWindowEnabled: event.target.checked } }))} />窗口闪动</label>
+            <label><input type="checkbox" checked={draftSettings.alerts.desktopNotificationEnabled} onChange={(event) => updateSettings((settings) => ({ ...settings, alerts: { ...settings.alerts, desktopNotificationEnabled: event.target.checked } }))} />桌面通知</label>
+            <label><input type="checkbox" checked={draftSettings.alerts.ignoreNegativeKeywordPosts} onChange={(event) => updateSettings((settings) => ({ ...settings, alerts: { ...settings.alerts, ignoreNegativeKeywordPosts: event.target.checked } }))} />排除负面关键词</label>
           </div>
+          <button onClick={saveSettings}><Save size={16} />保存设置</button>
+        </div>
+      </section>
+
+      <section className="panel keyword-panel">
+        <div className="panel-head">
+          <h2>关键词管理</h2>
+          <div className="segmented">
+            {(Object.keys(categoryLabels) as KeywordCategory[]).map((category) => (
+              <button className={keywordCategory === category ? "active" : ""} key={category} onClick={() => setKeywordCategory(category)}>
+                {categoryLabels[category]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="keyword-tools">
+          <input value={newKeyword} placeholder="输入英文关键词" onChange={(event) => setNewKeyword(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addKeyword()} />
+          <button onClick={addKeyword}><Plus size={16} />添加</button>
+          <button onClick={saveSettings}><Save size={16} />保存到本地</button>
+          <button onClick={() => fileInputRef.current?.click()}><Upload size={16} />导入 JSON</button>
+          <button onClick={exportKeywords}><Download size={16} />导出 JSON</button>
+          <input ref={fileInputRef} type="file" accept="application/json" hidden onChange={(event) => loadKeywordFile(event.target.files?.[0])} />
+        </div>
+        <div className="keyword-import">
+          <textarea value={importText} placeholder="批量导入：一行一个关键词，或用逗号分隔" onChange={(event) => setImportText(event.target.value)} />
+          <button onClick={importKeywords}><Upload size={16} />导入到当前分类</button>
+        </div>
+        <div className="keyword-list">
+          {keywordsByCategory.map((keyword) => (
+            <div className="keyword-row" key={keyword.id}>
+              <input type="checkbox" checked={keyword.enabled} onChange={(event) => updateSettings((settings) => ({ ...settings, keywords: settings.keywords.map((item) => item.id === keyword.id ? { ...item, enabled: event.target.checked } : item) }))} />
+              <input value={keyword.text} onChange={(event) => updateSettings((settings) => ({ ...settings, keywords: settings.keywords.map((item) => item.id === keyword.id ? { ...item, text: event.target.value } : item) }))} />
+              <button onClick={() => updateSettings((settings) => ({ ...settings, keywords: settings.keywords.filter((item) => item.id !== keyword.id) }))}><Trash2 size={16} /></button>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -253,10 +330,7 @@ function App() {
         <div className="panel-head">
           <h2>实时帖子列表</h2>
           <div className="filters">
-            <div className="search">
-              <Search size={16} />
-              <input placeholder="搜索内容、群组、关键词" value={query} onChange={(event) => setQuery(event.target.value)} />
-            </div>
+            <div className="search"><Search size={16} /><input placeholder="搜索内容、群组、关键词" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
             <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
               <option value="all">全部</option>
               <option value="new">只看新帖</option>
@@ -265,50 +339,17 @@ function App() {
             </select>
           </div>
         </div>
-
         <div className="table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th>状态</th>
-                <th>评分</th>
-                <th>新帖</th>
-                <th>群组</th>
-                <th>内容摘要</th>
-                <th>原始时间</th>
-                <th>解析时间</th>
-                <th>关键词</th>
-                <th>提醒</th>
-                <th>采集时间</th>
-                <th>来源</th>
-                <th>操作</th>
-              </tr>
-            </thead>
+            <thead><tr><th>状态</th><th>评分</th><th>新帖</th><th>群组</th><th>内容摘要</th><th>原始时间</th><th>解析时间</th><th>关键词</th><th>提醒</th><th>采集时间</th><th>来源</th><th>操作</th></tr></thead>
             <tbody>
               {posts.map((post) => (
                 <tr key={post.postId} className={post.alertTriggered ? "alert-row" : ""}>
-                  <td>{post.statusNote}</td>
-                  <td><strong>{post.score}</strong></td>
-                  <td>{post.isNewPost ? "是" : "否"}</td>
-                  <td>{post.groupName}</td>
-                  <td>{post.postTextPreview}</td>
-                  <td>{post.rawTimeText || "时间未识别"}</td>
-                  <td>{post.parsedPostTime}</td>
-                  <td>{post.matchedKeywords.join(", ")}</td>
-                  <td>{post.alertTriggered ? "是" : "否"}</td>
-                  <td>{post.collectedAt}</td>
-                  <td>{post.sourceWindowId}</td>
-                  <td className="row-actions">
-                    <button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button>
-                    <button title="查看详情" onClick={() => setSelectedPost(post)}>详情</button>
-                  </td>
+                  <td>{post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.postTextPreview}</td><td>{post.rawTimeText || "未识别"}</td><td>{post.parsedPostTime}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.alertTriggered ? "是" : "否"}</td><td>{post.collectedAt}</td><td>{post.sourceWindowId}</td>
+                  <td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button onClick={() => setSelectedPost(post)}>详情</button></td>
                 </tr>
               ))}
-              {posts.length === 0 && (
-                <tr>
-                  <td colSpan={12} className="empty">等待插件发送测试帖子或 Facebook 当前可见帖子。</td>
-                </tr>
-              )}
+              {posts.length === 0 && <tr><td colSpan={12} className="empty">等待插件发送测试帖子，或在 Facebook 群组页面点击采集。</td></tr>}
             </tbody>
           </table>
         </div>
@@ -323,7 +364,7 @@ function App() {
             <dt>链接</dt><dd>{selectedPost.postUrl}</dd>
             <dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd>
             <dt>群组</dt><dd>{selectedPost.groupName}</dd>
-            <dt>原始时间</dt><dd>{selectedPost.rawTimeText || "时间未识别"}</dd>
+            <dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd>
             <dt>解析时间</dt><dd>{selectedPost.parsedPostTime}</dd>
             <dt>匹配关键词</dt><dd>{selectedPost.matchedKeywords.join(", ") || "无"}</dd>
             <dt>排除关键词</dt><dd>{selectedPost.negativeKeywords.join(", ") || "无"}</dd>

@@ -24,11 +24,55 @@ async function heartbeatToLocal() {
     if (!response.ok) throw new Error(`Heartbeat failed: ${response.status}`);
     const data = await response.json();
     if (data.settings) latestSettings = data.settings;
+    if (Array.isArray(data.commands)) {
+      data.commands.forEach((command) => runExtensionCommand(command));
+    }
     setConnected(true);
     return true;
   } catch {
     setConnected(false);
     return false;
+  }
+}
+
+function facebookTabQuery() {
+  return { url: ["https://www.facebook.com/*", "https://facebook.com/*"] };
+}
+
+async function getActiveFacebookTab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const activeTab = tabs[0];
+  if (activeTab?.id && /^https:\/\/(www\.)?facebook\.com\//.test(activeTab.url || "")) return activeTab;
+  const facebookTabs = await chrome.tabs.query(facebookTabQuery());
+  return facebookTabs.find((tab) => tab.id);
+}
+
+async function sendToFacebookTab(message) {
+  const tab = await getActiveFacebookTab();
+  if (!tab?.id) return { ok: false, error: "No Facebook tab is open" };
+  try {
+    return await chrome.tabs.sendMessage(tab.id, message);
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/content.js"] });
+    return chrome.tabs.sendMessage(tab.id, message);
+  }
+}
+
+function runExtensionCommand(message) {
+  if (!message || !message.type) return;
+  if (message.type === "settings_updated") {
+    latestSettings = message.payload;
+    chrome.tabs.query(facebookTabQuery(), (tabs) => {
+      tabs.forEach((tab) => tab.id && chrome.tabs.sendMessage(tab.id, message).catch(() => undefined));
+    });
+  }
+  if (
+    message.type === "start_collecting" ||
+    message.type === "stop_collecting" ||
+    message.type === "start_auto_scroll" ||
+    message.type === "stop_auto_scroll"
+  ) {
+    sendToFacebookTab(message).catch(() => undefined);
   }
 }
 
@@ -90,15 +134,12 @@ async function connect() {
     const message = JSON.parse(event.data);
     if (message.type === "settings_updated") {
       latestSettings = message.payload;
-      chrome.tabs.query({ url: ["https://www.facebook.com/*", "https://facebook.com/*"] }, (tabs) => {
+      chrome.tabs.query(facebookTabQuery(), (tabs) => {
         tabs.forEach((tab) => tab.id && chrome.tabs.sendMessage(tab.id, { type: "settings_updated", payload: latestSettings }));
       });
     }
     if (message.type === "start_auto_scroll" || message.type === "stop_auto_scroll") {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const tabId = tabs[0]?.id;
-        if (tabId) chrome.tabs.sendMessage(tabId, message);
-      });
+      sendToFacebookTab(message).catch(() => undefined);
     }
   });
 
@@ -156,11 +197,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "collect_current_tab") {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tabId = tabs[0]?.id;
-      if (!tabId) return sendResponse({ ok: false, error: "No active tab" });
-      chrome.tabs.sendMessage(tabId, { type: "collect_now" }, sendResponse);
-    });
+    sendToFacebookTab({ type: "collect_now" }).then(sendResponse).catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }
 

@@ -190,12 +190,18 @@ button:hover {
 }
 
 input,
-select {
+select,
+textarea {
   border: 1px solid #b8c8c1;
   border-radius: 6px;
   min-height: 34px;
   padding: 6px 9px;
   background: #ffffff;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
 }
 
 .rule-grid {
@@ -206,6 +212,64 @@ select {
 
 .rule-grid span {
   color: #637176;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.settings-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-grid label:has(select) {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+}
+
+.keyword-panel {
+  margin-bottom: 14px;
+}
+
+.keyword-tools {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(4, max-content);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.keyword-import {
+  display: grid;
+  grid-template-columns: 1fr max-content;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.keyword-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(240px, 1fr));
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.keyword-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 34px;
+  align-items: center;
+  gap: 6px;
+}
+
+.keyword-row button {
+  min-width: 34px;
+  padding: 6px;
 }
 
 .posts-panel {
@@ -326,6 +390,12 @@ dd {
   }
 
   .split {
+    grid-template-columns: 1fr;
+  }
+
+  .keyword-tools,
+  .keyword-import,
+  .keyword-list {
     grid-template-columns: 1fr;
   }
 }

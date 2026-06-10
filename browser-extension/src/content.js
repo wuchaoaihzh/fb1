@@ -148,6 +148,7 @@ function collectVisiblePosts() {
 
 function startAutoScroll(count) {
   stopAutoScroll();
+  collecting = true;
   autoScrollProgress = { current: 0, total: count };
   const step = () => {
     if (autoScrollProgress.current >= autoScrollProgress.total) return stopAutoScroll();
@@ -182,10 +183,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, count: posts.length });
     return true;
   }
-  if (message.type === "start_collecting") collecting = true;
-  if (message.type === "stop_collecting") collecting = false;
-  if (message.type === "start_auto_scroll") startAutoScroll(Number(message.payload?.count || 5));
-  if (message.type === "stop_auto_scroll") stopAutoScroll();
+  if (message.type === "start_collecting") {
+    collecting = true;
+    const posts = collectVisiblePosts();
+    sendResponse({ ok: true, count: posts.length });
+    return true;
+  }
+  if (message.type === "stop_collecting") {
+    collecting = false;
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (message.type === "start_auto_scroll") {
+    startAutoScroll(Number(message.payload?.count || 5));
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (message.type === "stop_auto_scroll") {
+    stopAutoScroll();
+    sendResponse({ ok: true });
+    return true;
+  }
   return true;
 });
 
