@@ -98,5 +98,13 @@ export const defaultSettings: RadarSettings = {
     enabled: false,
     defaultIntervalSeconds: 60,
     groups: []
+  },
+  translation: {
+    enabled: false,
+    apiType: "openai",
+    apiKey: "",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4.1-mini",
+    targetLanguage: "中文"
   }
 };

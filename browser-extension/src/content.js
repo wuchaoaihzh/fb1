@@ -1,6 +1,7 @@
 let collecting = true;
 let autoScrollStopped = false;
 let monitorTimer = null;
+let latestSettings = null;
 const seenKeys = new Set();
 
 const noiseTexts = new Set([
@@ -25,6 +26,24 @@ const noiseTexts = new Set([
   "author",
   "top contributor"
 ]);
+
+const fallbackKeywords = {
+  highValue: [
+    "looking for supplier", "need supplier", "need manufacturer", "looking for manufacturer", "china supplier",
+    "chinese supplier", "factory", "factory price", "wholesale", "bulk order", "custom product", "private label",
+    "oem", "odm", "import from china", "source from china", "buy from china", "where can i buy", "who can supply",
+    "need this product", "supplier needed", "manufacturer needed", "dropshipping supplier", "fulfillment",
+    "agent in china", "sourcing agent"
+  ],
+  normal: [
+    "price", "quote", "quotation", "moq", "sample", "shipping", "logistics", "warehouse", "product", "catalog",
+    "available", "stock", "brand", "customized", "packaging"
+  ],
+  negative: [
+    "job", "hiring", "looking for job", "course", "training", "free", "giveaway", "scam", "investment",
+    "crypto", "loan", "dating", "used only", "second hand only", "repair service"
+  ]
+};
 
 function hash(value) {
   let result = 5381;
@@ -169,7 +188,8 @@ function extractPost(container) {
   const groupName = findGroupName();
   const groupUrl = findGroupUrl();
   const authorName = findAuthor(container);
-  const postText = extractPostText(container, authorName, rawTimeText);
+  const extractedText = extractPostText(container, authorName, rawTimeText);
+  const postText = extractedText || "未识别到正文";
   const postId = hash([postUrl, postText.slice(0, 120), groupName, rawTimeText].join("|"));
   return {
     postId,
@@ -187,17 +207,66 @@ function extractPost(container) {
   };
 }
 
+function enabledKeywords(category) {
+  if (!latestSettings?.keywords?.length) return fallbackKeywords[category] || [];
+  return (latestSettings?.keywords || [])
+    .filter((keyword) => keyword.enabled && keyword.category === category)
+    .map((keyword) => String(keyword.text || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function matchKeywords(text) {
+  const lower = String(text || "").toLowerCase();
+  const positive = [...enabledKeywords("highValue"), ...enabledKeywords("normal")].filter((keyword) => lower.includes(keyword));
+  const negative = enabledKeywords("negative").filter((keyword) => lower.includes(keyword));
+  return { positive: [...new Set(positive)], negative: [...new Set(negative)] };
+}
+
+function shouldKeepPost(post) {
+  if (!post.postText || post.postText === "未识别到正文") return { keep: false, positive: [], negative: [], reason: "正文未识别" };
+  if (isNoiseLine(post.postText)) return { keep: false, positive: [], negative: [], reason: "页面导航或交互噪音" };
+  const matches = matchKeywords(post.postText);
+  if (matches.negative.length > 0) return { keep: false, ...matches, reason: `命中排除关键词：${matches.negative.join(", ")}` };
+  if (matches.positive.length === 0) return { keep: false, ...matches, reason: "未匹配高价值或普通关键词" };
+  return { keep: true, ...matches, reason: "关键词匹配" };
+}
+
+function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {}) {
+  chrome.runtime.sendMessage({
+    type: "command_ack",
+    commandId: `scan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    commandType: "scan_result",
+    command: "scan_result",
+    success: true,
+    message: `本次扫描：发现 ${scannedCount} 条帖子，关键词匹配 ${matchedCount} 条，忽略 ${ignoredCount} 条`,
+    currentState: collecting ? "collecting" : "paused",
+    pluginState: collecting ? "collecting" : "paused",
+    details: { scannedCount, matchedCount, ignoredCount, source, ...extra }
+  });
+}
+
 function collectVisiblePosts({ allowSeen = false } = {}) {
   if (!collecting) return [];
-  const posts = likelyPostContainers()
+  const scanned = likelyPostContainers()
     .map(extractPost)
     .filter((post) => post.postText.length >= 8 && !isNoiseLine(post.postText));
-  const fresh = allowSeen ? posts : posts.filter((post) => {
+  const matched = [];
+  const ignoredReasons = {};
+  for (const post of scanned) {
+    const decision = shouldKeepPost(post);
+    if (decision.keep) {
+      matched.push(post);
+    } else {
+      ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
+    }
+  }
+  const fresh = allowSeen ? matched : matched.filter((post) => {
     const key = post.postUrl && post.postUrl !== window.location.href ? post.postUrl : post.postId;
     if (seenKeys.has(key)) return false;
     seenKeys.add(key);
     return true;
   });
+  sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { ignoredReasons, sentCount: fresh.length });
   if (fresh.length > 0) chrome.runtime.sendMessage({ type: "posts_batch_collected", payload: fresh });
   return fresh;
 }
@@ -383,6 +452,11 @@ async function diagnose(commandId) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "settings_updated") {
+    latestSettings = message.payload;
+    sendResponse({ ok: true, message: "关键词和配置已同步到 content script", currentState: collecting ? "collecting" : "paused" });
+    return true;
+  }
   if (message.type === "ping_content") {
     sendResponse({ ok: true, url: location.href });
     return true;
@@ -434,12 +508,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, message: "诊断已启动", currentState: "collecting" });
     return true;
   }
-  if (message.type === "start_group_monitor") {
+  if (message.type === "start_group_monitor" || message.type === "start_monitoring") {
     startGroupMonitor(message.commandId || `monitor-${Date.now()}`, Number(message.payload?.intervalSeconds || 60));
     sendResponse({ ok: true, message: "群组监控已启动", currentState: "monitoring" });
     return true;
   }
-  if (message.type === "stop_group_monitor") {
+  if (message.type === "stop_group_monitor" || message.type === "stop_monitoring") {
     if (monitorTimer) clearInterval(monitorTimer);
     monitorTimer = null;
     sendResponse({ ok: true, message: "群组监控已停止", currentState: "stopped" });

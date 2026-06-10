@@ -53,6 +53,9 @@ async function sendToFacebookTab(message) {
 
   try {
     await ensureContentScript(tab.id);
+    if (latestSettings) {
+      await chrome.tabs.sendMessage(tab.id, { type: "settings_updated", payload: latestSettings }).catch(() => undefined);
+    }
   } catch (error) {
     return {
       ok: false,
@@ -184,10 +187,10 @@ async function runExtensionCommand(message) {
     } else if (commandType === "stop_auto_scroll") {
       result = await sendToFacebookTab(message);
       nextState = result.ok === false ? "error" : "collecting";
-    } else if (commandType === "diagnose" || commandType === "start_group_monitor" || commandType === "stop_group_monitor") {
+    } else if (commandType === "diagnose" || commandType === "start_group_monitor" || commandType === "stop_group_monitor" || commandType === "start_monitoring" || commandType === "stop_monitoring") {
       result = await sendToFacebookTab(message);
-      if (commandType === "start_group_monitor" && result.ok !== false) nextState = "monitoring";
-      if (commandType === "stop_group_monitor" && result.ok !== false) nextState = "stopped";
+      if ((commandType === "start_group_monitor" || commandType === "start_monitoring") && result.ok !== false) nextState = "monitoring";
+      if ((commandType === "stop_group_monitor" || commandType === "stop_monitoring") && result.ok !== false) nextState = "stopped";
       if (result.ok === false) nextState = "error";
     } else {
       result = { ok: false, error: `命令 ${commandType} 尚未实现，已禁用真实执行` };

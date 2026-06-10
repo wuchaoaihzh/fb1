@@ -70,11 +70,21 @@ export interface GroupMonitorSettings {
   groups: GroupMonitorItem[];
 }
 
+export interface TranslationSettings {
+  enabled: boolean;
+  apiType: "openai" | "openai-compatible" | "local";
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  targetLanguage: string;
+}
+
 export interface RadarSettings {
   keywords: KeywordItem[];
   alerts: AlertSettings;
   autoScroll: AutoScrollSettings;
   groupMonitor: GroupMonitorSettings;
+  translation: TranslationSettings;
 }
 
 export interface ExtensionClientInfo {
@@ -113,6 +123,8 @@ export type BridgeMessage =
   | { type: "diagnose"; commandId?: string }
   | { type: "start_group_monitor"; commandId?: string; payload: { intervalSeconds: number } }
   | { type: "stop_group_monitor"; commandId?: string }
+  | { type: "start_monitoring"; commandId?: string; payload: { intervalSeconds: number } }
+  | { type: "stop_monitoring"; commandId?: string }
   | {
       type: "command_ack";
       clientId?: string;

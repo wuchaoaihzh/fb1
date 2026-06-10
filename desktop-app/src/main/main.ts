@@ -74,6 +74,7 @@ const commandLabels: Record<string, string> = {
   "mark-handled": "标记已处理",
   "ignore-post": "忽略帖子",
   "update-settings": "保存设置",
+  "test-translation": "测试翻译",
   "start-group-monitor": "开始群组监控",
   "stop-group-monitor": "停止群组监控"
 };
@@ -120,7 +121,8 @@ function loadPersistedData(): void {
         ...saved,
         alerts: { ...defaultSettings.alerts, ...saved.alerts },
         autoScroll: { ...defaultSettings.autoScroll, ...saved.autoScroll },
-        groupMonitor: { ...defaultSettings.groupMonitor, ...saved.groupMonitor }
+        groupMonitor: { ...defaultSettings.groupMonitor, ...saved.groupMonitor },
+        translation: { ...defaultSettings.translation, ...saved.translation }
       };
     }
     const savedPostsFile = firstExistingFile([postsFile(), path.join(dataDir(), "posts.json")]);
@@ -245,6 +247,18 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandI
   return { commandId: id, sent: true };
 }
 
+function assertWritableDir(dir: string): boolean {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-test-${Date.now()}`);
+    fs.writeFileSync(probe, "ok", "utf8");
+    fs.unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function flashWindow(): void {
   if (!mainWindow) return;
   mainWindow.show();
@@ -312,8 +326,13 @@ function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost 
 
 function addPosts(incoming: Partial<RadarPost>[], clientId?: string): void {
   let count = 0;
+  let ignored = 0;
   incoming.forEach((item) => {
     const post = enrichPost(item, clientId);
+    if (post.matchedKeywords.length === 0 || post.negativeKeywords.length > 0 || post.postText === "未识别到正文") {
+      ignored += 1;
+      return;
+    }
     const key = dedupeKey(post);
     const previous = posts.get(key);
     posts.set(key, previous ? { ...previous, ...post, alertTriggered: previous.alertTriggered || post.alertTriggered } : post);
@@ -321,6 +340,7 @@ function addPosts(incoming: Partial<RadarPost>[], clientId?: string): void {
   });
   persistPosts();
   log("Posts collected", { count, source: clientId });
+  addOperation(`已加入实时帖子列表：${count} 条；关键词过滤忽略：${ignored} 条`, count > 0 ? "success" : "info");
   broadcastState();
 }
 
@@ -568,17 +588,62 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
       ...incoming,
       alerts: { ...defaultSettings.alerts, ...incoming.alerts },
       autoScroll: { ...defaultSettings.autoScroll, ...incoming.autoScroll },
-      groupMonitor: { ...defaultSettings.groupMonitor, ...incoming.groupMonitor }
+      groupMonitor: { ...defaultSettings.groupMonitor, ...incoming.groupMonitor },
+      translation: { ...defaultSettings.translation, ...incoming.translation }
     };
     persistSettings();
     addOperation(`设置已保存；群组数量：${settings.groupMonitor.groups.length}`, "success");
     broadcastToExtensions({ type: "settings_updated", payload: settings });
   }
+  if (command === "test-translation") {
+    const translation = settings.translation;
+    if (!translation.apiKey && translation.apiType !== "local") {
+      addOperation("测试翻译失败：API Key 未配置", "error");
+      return { ok: false, message: "测试失败：API Key 未配置" };
+    }
+    if (!translation.baseUrl) {
+      addOperation("测试翻译失败：Base URL 未配置", "error");
+      return { ok: false, message: "测试失败：Base URL 未配置" };
+    }
+    try {
+      const response = await fetch(`${translation.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(translation.apiKey ? { Authorization: `Bearer ${translation.apiKey}` } : {})
+        },
+        body: JSON.stringify({
+          model: translation.model,
+          messages: [
+            { role: "system", content: `Translate the user text to ${translation.targetLanguage}. Return only the translation.` },
+            { role: "user", content: "Looking for supplier for wholesale custom product." }
+          ],
+          temperature: 0
+        })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const translated = data.choices?.[0]?.message?.content?.trim();
+      if (!translated) throw new Error("API 没有返回翻译内容");
+      addOperation(`测试翻译成功：${translated}`, "success");
+      return { ok: true, message: translated };
+    } catch (error) {
+      const message = `测试翻译失败：${String(error instanceof Error ? error.message : error)}`;
+      addOperation(message, "error");
+      return { ok: false, message };
+    }
+  }
   if (command === "start-auto-scroll") return sendCommand("start_auto_scroll", payload as { count: number; delayMs?: number });
   if (command === "stop-auto-scroll") return sendCommand("stop_auto_scroll");
   if (command === "test-collect") return sendCommand("collect_once");
   if (command === "test-scroll") return sendCommand("scroll_once");
-  if (command === "diagnose") return sendCommand("diagnose");
+  if (command === "diagnose") {
+    const logsOk = assertWritableDir(path.dirname(operationLogFile()));
+    const configOk = assertWritableDir(path.dirname(settingsFile()));
+    const translationConfigured = Boolean(settings.translation.apiKey || settings.translation.apiType === "local");
+    addOperation(`功能自检：本地服务=正常；插件连接=${stats().connectedClients > 0 ? "正常" : "失败"}；日志目录=${logsOk ? "正常" : "失败"}；config目录=${configOk ? "正常" : "失败"}；翻译API=${translationConfigured ? "正常" : "未配置"}；列表过滤=只保存关键词匹配结果`, logsOk && configOk ? "info" : "error");
+    return sendCommand("diagnose");
+  }
   if (command === "start-group-monitor") return sendCommand("start_group_monitor", payload as { intervalSeconds: number });
   if (command === "stop-group-monitor") return sendCommand("stop_group_monitor");
   persistPosts();

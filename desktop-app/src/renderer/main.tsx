@@ -84,7 +84,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "new" | "alerted" | "unknown">("all");
   const [sortMode, setSortMode] = useState<SortMode>("recommended");
-  const [translationEnabled, setTranslationEnabled] = useState(false);
+  const [translationOpen, setTranslationOpen] = useState(false);
   const [keywordOpen, setKeywordOpen] = useState(false);
   const [keywordCategory, setKeywordCategory] = useState<KeywordCategory>("highValue");
   const [newKeyword, setNewKeyword] = useState("");
@@ -143,6 +143,14 @@ function App() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    const latest = state.operationLog[0];
+    if (!latest) return;
+    if (latest.message.startsWith("插件确认：") || latest.message.includes("失败") || latest.message.startsWith("本次扫描：")) {
+      notify(latest.message);
+    }
+  }, [state.operationLog]);
 
   const notify = (message: string) => {
     setToast(message);
@@ -267,13 +275,14 @@ function App() {
   };
 
   const toggleTranslation = async () => {
-    if (!translationEnabled) {
-      notify("翻译接口未配置，请先在设置中填写 API Key");
+    if (!draftSettings.translation.apiKey && draftSettings.translation.apiType !== "local") {
+      notify("翻译 API 未配置，请先进入翻译设置填写 API Key。");
+      setTranslationOpen(true);
       await command("ui-log", "实时翻译未开启：翻译 API 未配置");
       return;
     }
-    setTranslationEnabled(false);
-    await command("ui-log", "实时翻译已关闭");
+    const nextSettings = { ...draftSettings, translation: { ...draftSettings.translation, enabled: !draftSettings.translation.enabled } };
+    await commitSettings(nextSettings, nextSettings.translation.enabled ? "实时翻译已开启" : "实时翻译已关闭");
   };
 
   const connectionHint = state.stats.connectedClients === 0 ? "插件未连接，请确认浏览器插件已安装并打开 Facebook 页面" : "插件已连接，等待 Facebook 页面命令确认";
@@ -314,8 +323,25 @@ function App() {
         <button onClick={() => command("clear-logs")}><Trash2 size={16} />清空日志</button>
         <button onClick={testSound}><Volume2 size={16} />测试声音</button>
         <button onClick={testFlash}><Bell size={16} />测试闪动</button>
-        <button onClick={toggleTranslation}><Download size={16} />实时翻译：{translationEnabled ? "开启" : "关闭"}</button>
+        <button onClick={toggleTranslation}><Download size={16} />实时翻译：{draftSettings.translation.enabled ? "开启" : "关闭"}</button>
+        <button onClick={() => setTranslationOpen(!translationOpen)}><Save size={16} />翻译设置</button>
       </section>
+
+      {translationOpen && <section className="panel">
+        <div className="panel-head"><h2>翻译设置</h2><span>{draftSettings.translation.apiKey || draftSettings.translation.apiType === "local" ? "已配置" : "未配置"}</span></div>
+        <div className="settings-grid">
+          <label className="field"><span>启用实时翻译</span><input type="checkbox" checked={draftSettings.translation.enabled} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, enabled: event.target.checked } }))} /></label>
+          <label className="field"><span>API 类型</span><select value={draftSettings.translation.apiType} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, apiType: event.target.value as RadarSettings["translation"]["apiType"] } }))}><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI Compatible</option><option value="local">Local API</option></select></label>
+          <label className="field"><span>API Key</span><input type="password" value={draftSettings.translation.apiKey} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, apiKey: event.target.value } }))} placeholder="sk-..." /></label>
+          <label className="field"><span>Base URL</span><input value={draftSettings.translation.baseUrl} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, baseUrl: event.target.value } }))} /></label>
+          <label className="field"><span>Model</span><input value={draftSettings.translation.model} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, model: event.target.value } }))} /></label>
+          <label className="field"><span>目标语言</span><input value={draftSettings.translation.targetLanguage} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, targetLanguage: event.target.value } }))} /></label>
+        </div>
+        <div className="inline-actions">
+          <button onClick={saveSettings}><Save size={16} />保存翻译设置</button>
+          <button onClick={() => command("test-translation", undefined, "测试翻译命令已发送")}><Radio size={16} />测试翻译</button>
+        </div>
+      </section>}
 
       <section className="split">
         <div className="panel">
@@ -374,7 +400,7 @@ function App() {
           </div>
         </div>
         <div className="table-wrap"><table><thead><tr><th>提醒状态</th><th>评分</th><th>新帖</th><th>群组名称</th><th>发布时间</th><th>内容摘要</th><th>中文翻译</th><th>匹配关键词</th><th>来源窗口</th><th>操作</th></tr></thead><tbody>
-          {posts.map((post) => <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""}><td>{post.alertTriggered ? "已提醒" : post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td><td>{post.postTextPreview}</td><td>{translationEnabled ? "翻译中..." : "未开启"}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.sourceWindowId}</td><td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button title="复制链接" onClick={() => { navigator.clipboard.writeText(post.postUrl); command("ui-log", `已复制帖子链接：${post.postUrl}`); notify("链接已复制"); }}><Copy size={15} /></button><button onClick={() => command("mark-handled", post.postId)}>已处理</button><button onClick={() => command("ignore-post", post.postId)}>忽略</button><button onClick={() => { setSelectedPost(post); command("ui-log", `查看帖子详情：${post.postUrl || post.postId}`); }}>详情</button></td></tr>)}
+          {posts.map((post) => <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""}><td>{post.alertTriggered ? "已提醒" : post.statusNote}</td><td><strong>{post.score}</strong></td><td>{post.isNewPost ? "是" : "否"}</td><td>{post.groupName}</td><td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td><td>{post.postTextPreview}</td><td>{draftSettings.translation.enabled ? "翻译待处理" : "未开启"}</td><td>{post.matchedKeywords.join(", ")}</td><td>{post.sourceWindowId}</td><td className="row-actions"><button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button><button title="复制链接" onClick={() => { navigator.clipboard.writeText(post.postUrl); command("ui-log", `已复制帖子链接：${post.postUrl}`); notify("链接已复制"); }}><Copy size={15} /></button><button onClick={() => command("mark-handled", post.postId)}>已处理</button><button onClick={() => command("ignore-post", post.postId)}>忽略</button><button onClick={() => { setSelectedPost(post); command("ui-log", `查看帖子详情：${post.postUrl || post.postId}`); }}>详情</button></td></tr>)}
           {posts.length === 0 && <tr><td colSpan={10} className="empty">等待插件发送帖子。请打开 Facebook 群组页面后点击“测试连接”或“开始采集”。</td></tr>}
         </tbody></table></div>
       </section>
@@ -389,7 +415,7 @@ function App() {
         </>}
       </section>
 
-      {selectedPost && <div className="modal-backdrop" onClick={() => setSelectedPost(null)}><aside className="modal" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setSelectedPost(null)}>X</button><h2>帖子详情</h2><dl><dt>完整内容</dt><dd>{selectedPost.postText}</dd><dt>中文翻译</dt><dd>{translationEnabled ? "翻译接口未配置" : "实时翻译未开启"}</dd><dt>群组</dt><dd>{selectedPost.groupName}</dd><dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd><dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd><dt>解析时间</dt><dd>{selectedPost.parsedPostTime}</dd><dt>评分</dt><dd>{selectedPost.score}</dd><dt>匹配关键词</dt><dd>{selectedPost.matchedKeywords.join(", ") || "无"}</dd><dt>排除关键词</dt><dd>{selectedPost.negativeKeywords.join(", ") || "无"}</dd><dt>评分原因</dt><dd>{selectedPost.scoreReasons.join("；") || "无"}</dd><dt>链接</dt><dd>{selectedPost.postUrl}</dd></dl><div className="inline-actions"><button onClick={() => command("open-url", selectedPost.postUrl)}>打开帖子</button><button onClick={() => { navigator.clipboard.writeText(selectedPost.postUrl); command("ui-log", `已复制帖子链接：${selectedPost.postUrl}`); }}>复制链接</button><button onClick={() => command("mark-handled", selectedPost.postId)}>标记已处理</button></div></aside></div>}
+      {selectedPost && <div className="modal-backdrop" onClick={() => setSelectedPost(null)}><aside className="modal" onClick={(event) => event.stopPropagation()}><button className="close" onClick={() => setSelectedPost(null)}>X</button><h2>帖子详情</h2><dl><dt>完整内容</dt><dd>{selectedPost.postText}</dd><dt>中文翻译</dt><dd>{draftSettings.translation.enabled ? "翻译待处理" : "实时翻译未开启"}</dd><dt>群组</dt><dd>{selectedPost.groupName}</dd><dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd><dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd><dt>解析时间</dt><dd>{selectedPost.parsedPostTime}</dd><dt>评分</dt><dd>{selectedPost.score}</dd><dt>匹配关键词</dt><dd>{selectedPost.matchedKeywords.join(", ") || "无"}</dd><dt>排除关键词</dt><dd>{selectedPost.negativeKeywords.join(", ") || "无"}</dd><dt>评分原因</dt><dd>{selectedPost.scoreReasons.join("；") || "无"}</dd><dt>链接</dt><dd>{selectedPost.postUrl}</dd></dl><div className="inline-actions"><button onClick={() => command("open-url", selectedPost.postUrl)}>打开帖子</button><button onClick={() => { navigator.clipboard.writeText(selectedPost.postUrl); command("ui-log", `已复制帖子链接：${selectedPost.postUrl}`); }}>复制链接</button><button onClick={() => command("mark-handled", selectedPost.postId)}>标记已处理</button></div></aside></div>}
     </main>
   );
 }
