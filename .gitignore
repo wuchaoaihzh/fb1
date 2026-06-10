@@ -3,4 +3,5 @@ dist/
 release/
 *.log
 *.bak
-* - 副本.*
+*.tmp
+*.tsbuildinfo
