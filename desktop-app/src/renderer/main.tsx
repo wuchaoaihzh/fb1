@@ -76,7 +76,7 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.12", operationLog: [], stats: emptyStats, clients: [] });
+  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.13", operationLog: [], stats: emptyStats, clients: [] });
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
@@ -108,9 +108,6 @@ function App() {
           const settings = { ...defaultSettings, ...message.payload.settings, groupMonitor: { ...defaultSettings.groupMonitor, ...message.payload.settings?.groupMonitor } };
           setState((previous) => ({ ...previous, ...message.payload, settings }));
           setDraftSettings(settings);
-          setScrollCount(settings.autoScroll.defaultScrollCount);
-          setScrollDelaySeconds(Math.max(1, Math.round(settings.autoScroll.waitMsAfterScroll / 1000)));
-          setMonitorInterval(settings.groupMonitor.defaultIntervalSeconds);
         }
       });
       socket.addEventListener("close", () => {
@@ -126,6 +123,18 @@ function App() {
       socket?.close();
     };
   }, []);
+
+  useEffect(() => {
+    setScrollCount(draftSettings.autoScroll.defaultScrollCount);
+  }, [draftSettings.autoScroll.defaultScrollCount]);
+
+  useEffect(() => {
+    setScrollDelaySeconds(Math.max(1, Math.round(draftSettings.autoScroll.waitMsAfterScroll / 1000)));
+  }, [draftSettings.autoScroll.waitMsAfterScroll]);
+
+  useEffect(() => {
+    setMonitorInterval(draftSettings.groupMonitor.defaultIntervalSeconds);
+  }, [draftSettings.groupMonitor.defaultIntervalSeconds]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -305,7 +314,7 @@ function App() {
       {toast && <div className="toast">{toast}</div>}
       <header className="topbar">
         <div>
-          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.12"}</span></h1>
+          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.13"}</span></h1>
           <p>只读取当前浏览器已登录且可见的 Facebook 群组页面，不自动评论，不绕过权限。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}><Radio size={18} />{socketReady ? "本地服务已连接" : "本地服务未连接"}</div>

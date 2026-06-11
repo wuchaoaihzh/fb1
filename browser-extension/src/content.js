@@ -400,10 +400,10 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
   return fresh;
 }
 
-function startCollectLoop() {
+function startCollectLoop({ allowSeen = false } = {}) {
   collecting = true;
   if (collectTimer) clearInterval(collectTimer);
-  collectVisiblePosts();
+  collectVisiblePosts({ allowSeen });
   collectTimer = setInterval(() => collectVisiblePosts(), 4000);
 }
 
@@ -567,8 +567,8 @@ function sendAck(commandId, commandType, success, message, currentState, details
 async function startAutoScroll(commandId, total, delayMs) {
   autoScrollStopped = false;
   collecting = true;
-  startCollectLoop();
-  const initialPosts = collectVisiblePosts();
+  startCollectLoop({ allowSeen: true });
+  const initialPosts = collectVisiblePosts({ allowSeen: true });
   sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前滑动次数：0 / ${total}`, "auto_scrolling", {
     currentStep: 0,
     totalSteps: total,
@@ -657,8 +657,8 @@ async function runDesktopCommand(message) {
   }
   if (message.type === "ping_content") return { ok: true, url: location.href, currentState: collecting ? "collecting" : "stopped" };
   if (message.type === "collect_now" || message.type === "collect_once" || message.type === "start_collecting") {
-    startCollectLoop();
-    const posts = collectVisiblePosts();
+    startCollectLoop({ allowSeen: true });
+    const posts = collectVisiblePosts({ allowSeen: true });
     return { ok: true, message: `采集已启动，后台正在监听此 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" };
   }
   if (message.type === "clear_posts") {

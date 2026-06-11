@@ -24,7 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const serverPort = 8765;
-const appVersion = "0.1.12";
+const appVersion = "0.1.13";
 app.setName("Facebook Opportunity Radar");
 
 let mainWindow: BrowserWindow | null = null;
@@ -313,7 +313,7 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): Promise<Co
   if (commandClientCount === 0) {
     collectionState = "error";
     addOperation(`命令发送失败：${type}；当前没有正在轮询的 Facebook content script`, "error");
-    addOperation("当前没有可采集的 Facebook 页面：请刷新 Facebook 页面，确认插件版本为 v0.1.12，并保持该页面打开", "warning");
+    addOperation("当前没有可采集的 Facebook 页面：请刷新 Facebook 页面，确认插件版本为 v0.1.13，并保持该页面打开", "warning");
     broadcastState();
     return Promise.resolve({ commandId: id, sent: false, ack: false, success: false, message: "当前没有可采集的 Facebook 页面，请刷新 Facebook 页面或重新加载插件" });
   }
