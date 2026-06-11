@@ -24,7 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const serverPort = 8765;
-const appVersion = "0.1.8";
+const appVersion = "0.1.9";
 app.setName("Facebook Opportunity Radar");
 
 let mainWindow: BrowserWindow | null = null;
@@ -193,6 +193,10 @@ function stats(): RadarStats {
   };
 }
 
+function isFacebookUrl(url?: string): boolean {
+  return /^https:\/\/(www\.)?facebook\.com\//.test(String(url || ""));
+}
+
 function activeHttpClients(excludedClientIds = new Set<string>()): ExtensionClientInfo[] {
   const now = Date.now();
   const active: ExtensionClientInfo[] = [];
@@ -209,6 +213,10 @@ function activeHttpClients(excludedClientIds = new Set<string>()): ExtensionClie
     });
   });
   return active;
+}
+
+function activeCommandClients(): ExtensionClientInfo[] {
+  return activeHttpClients().filter((client) => isFacebookUrl(client.tabUrl));
 }
 
 function appState() {
@@ -233,16 +241,15 @@ function broadcastState(): void {
   });
 }
 
-function broadcastToExtensions(message: BridgeMessage): void {
-  const serialized = JSON.stringify(message);
-  clients.forEach((_, socket) => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(serialized);
-  });
-  activeHttpClients().forEach((client) => {
+function broadcastToExtensions(message: BridgeMessage): number {
+  let sentCount = 0;
+  activeCommandClients().forEach((client) => {
     const queue = commandQueues.get(client.clientId) || [];
     queue.push(message);
     commandQueues.set(client.clientId, queue.slice(-20));
+    sentCount += 1;
   });
+  return sentCount;
 }
 
 function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" }>): void {
@@ -273,6 +280,7 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
 function sendCommand(type: BridgeMessage["type"], payload?: unknown): Promise<CommandResult> {
   const id = commandId();
   const connectedCount = stats().connectedClients;
+  const commandClientCount = activeCommandClients().length;
   if (connectedCount === 0) {
     collectionState = "error";
     addOperation(`命令发送失败：${type}；未检测到已连接插件`, "error");
@@ -280,9 +288,22 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): Promise<Co
     broadcastState();
     return Promise.resolve({ commandId: id, sent: false, ack: false, success: false, message: "插件未连接，请确认浏览器插件已安装，并打开 Facebook 页面" });
   }
+  if (commandClientCount === 0) {
+    collectionState = "error";
+    addOperation(`命令发送失败：${type}；当前没有正在轮询的 Facebook content script`, "error");
+    addOperation("当前没有可采集的 Facebook 页面：请刷新 Facebook 页面，确认插件版本为 v0.1.9，并保持该页面打开", "warning");
+    broadcastState();
+    return Promise.resolve({ commandId: id, sent: false, ack: false, success: false, message: "当前没有可采集的 Facebook 页面，请刷新 Facebook 页面或重新加载插件" });
+  }
   const message = payload === undefined ? ({ type, commandId: id } as BridgeMessage) : ({ type, commandId: id, payload } as BridgeMessage);
   addOperation(`桌面端发送命令：${type}；commandId=${id}`, "info");
-  broadcastToExtensions(message);
+  const sentCount = broadcastToExtensions(message);
+  if (sentCount === 0) {
+    collectionState = "error";
+    addOperation(`命令发送失败：${type}；没有可投递的 Facebook 页面`, "error");
+    broadcastState();
+    return Promise.resolve({ commandId: id, sent: false, ack: false, success: false, message: "没有可投递的 Facebook 页面" });
+  }
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
       if (pendingCommands.has(id)) {
