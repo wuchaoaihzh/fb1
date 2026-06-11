@@ -298,16 +298,35 @@ function likelyPostContainers() {
   return [...new Set(filtered)];
 }
 
+function extractTimeFragment(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (/^\d{10,13}$/.test(text)) {
+    const millis = text.length === 13 ? Number(text) : Number(text) * 1000;
+    const parsed = new Date(millis);
+    return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString();
+  }
+  const relativeMatch = text.match(/(Just now|Now|Yesterday|刚刚|\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|分钟|分|小时|小時|天|周))/i);
+  if (relativeMatch?.[1]) return relativeMatch[1].trim();
+  const absoluteMatch = text.match(/\b(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December)\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?\b/i);
+  if (absoluteMatch?.[0]) return absoluteMatch[0].trim();
+  const chineseAbsoluteMatch = text.match(/(?:\d{4}年\s*)?\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?:[:：]\d{2})?)?/);
+  if (chineseAbsoluteMatch?.[0]) return chineseAbsoluteMatch[0].trim();
+  const weekdayMatch = text.match(/(?:Today|Yesterday|Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Tues(?:day)?|Wed(?:nesday)?|Thu(?:rsday)?|Thur(?:sday)?|Fri(?:day)?|Sat(?:urday)?|今天|昨天|周[一二三四五六日天]|星期[一二三四五六日天])(?:\s+(?:at\s+)?)?(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?::\d{2})?\s*(?:[AP]M)?/i);
+  if (weekdayMatch?.[0]) return weekdayMatch[0].trim();
+  const isoMatch = text.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}(?:[:.]\d{2})(?:[:.]\d{2})?)?/);
+  if (isoMatch?.[0]) return isoMatch[0].trim();
+  const normalized = text.replace(/ at /i, " ").replace(/(\d{1,2})\.(\d{2})\.(\d{2})$/, "$1:$2:$3");
+  return Number.isNaN(new Date(normalized).getTime()) ? "" : text;
+}
+
 function looksLikeTime(value) {
-  const text = String(value || "").trim();
-  if (!text) return false;
-  if (/^(Just now|Now|Yesterday|\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))$/i.test(text)) return true;
-  return !Number.isNaN(new Date(text.replace(/ at /i, " ")).getTime());
+  return Boolean(extractTimeFragment(value));
 }
 
 function topSectionLimit(container) {
   const rect = container.getBoundingClientRect();
-  return rect.top + Math.min(260, Math.max(120, rect.height * 0.42));
+  return rect.top + Math.min(360, Math.max(140, rect.height * 0.55));
 }
 
 function isInTopSection(container, element) {
@@ -318,14 +337,14 @@ function topSectionLines(container) {
   const lines = [];
   for (const child of [...container.children]) {
     if (!isVisibleElement(child)) continue;
-    if (!isInTopSection(container, child) && lines.length >= 8) break;
+    if (!isInTopSection(container, child) && lines.length >= 10) break;
     for (const line of visibleLines(child)) {
       if (/^(like|comment|share|send|write a comment|most relevant|view more comments?)$/i.test(line)) return lines;
       lines.push(line);
-      if (lines.length >= 18) return lines;
+      if (lines.length >= 24) return lines;
     }
   }
-  return lines.length > 0 ? lines : visibleLines(container).slice(0, 18);
+  return lines.length > 0 ? lines : visibleLines(container).slice(0, 24);
 }
 
 function findPostUrl(container) {
@@ -338,15 +357,16 @@ function findPostUrl(container) {
 }
 
 function findRawTime(container) {
-  const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title]")]
+  const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
       const value = [
         element.getAttribute("aria-label"),
         element.getAttribute("title"),
         element.getAttribute("datetime"),
+        element.getAttribute("data-utime"),
         visibleText(element)
-      ].find((candidate) => looksLikeTime(candidate));
+      ].map((candidate) => extractTimeFragment(candidate)).find(Boolean);
       let score = 0;
       if (value) score += 3;
       if (element.tagName.toLowerCase() === "time" || element.getAttribute("datetime")) score += 2;
@@ -358,7 +378,8 @@ function findRawTime(container) {
     .sort((a, b) => b.score - a.score || a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top);
   if (candidates[0]?.value) return candidates[0].value.trim();
   for (const line of topSectionLines(container)) {
-    if (looksLikeTime(line)) return line;
+    const fragment = extractTimeFragment(line);
+    if (fragment) return fragment;
   }
   return "";
 }

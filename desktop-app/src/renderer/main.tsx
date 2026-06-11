@@ -78,15 +78,45 @@ function normalizeGroupUrl(value: string): string {
 }
 
 function parseTimeValue(text: string): number {
-  if (!text || text === "时间未识别") return 0;
-  const direct = new Date(text.replace(" ", "T"));
-  if (!Number.isNaN(direct.getTime())) return direct.getTime();
-  const fallback = new Date(text);
+  const value = String(text || "").trim();
+  if (!value || value === "时间未识别") return 0;
+  const normalized = value.replace(/ (\d{2})\.(\d{2})\.(\d{2})$/, " $1:$2:$3").replace(" ", "T");
+  const parsed = new Date(normalized);
+  if (!Number.isNaN(parsed.getTime())) return parsed.getTime();
+  const fallback = new Date(value);
   return Number.isNaN(fallback.getTime()) ? 0 : fallback.getTime();
 }
 
+function dateKeyFromText(text: string): string {
+  const value = String(text || "").trim();
+  const direct = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (direct) return `${direct[1]}-${direct[2].padStart(2, "0")}-${direct[3].padStart(2, "0")}`;
+  const parsed = parseTimeValue(value);
+  if (!parsed) return "";
+  const date = new Date(parsed);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function displayPostTime(post: RadarPost): { primary: string; secondary: string } {
+  const parsed = String(post.parsedPostTime || "").trim();
+  const raw = String(post.rawTimeText || "").trim();
+  const hasParsed = parsed && parsed !== "时间未识别";
+  if (hasParsed) {
+    return {
+      primary: parsed,
+      secondary: raw && raw !== parsed ? raw : ""
+    };
+  }
+  return {
+    primary: raw || "未识别",
+    secondary: ""
+  };
+}
+
 async function playBeep(): Promise<void> {
-  const context = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)!();
+  const AudioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) return;
+  const context = new AudioContextCtor();
   if (context.state === "suspended") await context.resume();
   const oscillator = context.createOscillator();
   const gain = context.createGain();
@@ -113,6 +143,26 @@ function scrollStateLabel(value?: ScrollState): string {
   return "未启动";
 }
 
+function applyTranslationPreset(translation: RadarSettings["translation"], apiType: RadarSettings["translation"]["apiType"]): RadarSettings["translation"] {
+  if (apiType === "deepseek") {
+    return {
+      ...translation,
+      apiType,
+      baseUrl: "https://api.deepseek.com/v1",
+      model: translation.model && translation.apiType === "deepseek" ? translation.model : "deepseek-chat"
+    };
+  }
+  if (apiType === "openai") {
+    return {
+      ...translation,
+      apiType,
+      baseUrl: "https://api.openai.com/v1",
+      model: translation.model && translation.apiType === "openai" ? translation.model : "gpt-4.1-mini"
+    };
+  }
+  return { ...translation, apiType };
+}
+
 function App() {
   const [state, setState] = useState<AppState>({
     posts: [],
@@ -134,6 +184,7 @@ function App() {
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [sortMode, setSortMode] = useState<SortMode>("recommended");
   const [minScore, setMinScore] = useState(0);
+  const [dateFilter, setDateFilter] = useState("");
   const [translationOpen, setTranslationOpen] = useState(false);
   const [keywordOpen, setKeywordOpen] = useState(false);
   const [keywordCategory, setKeywordCategory] = useState<KeywordCategory>("highValue");
@@ -144,6 +195,7 @@ function App() {
   const [flashUi, setFlashUi] = useState(false);
   const [selectedPost, setSelectedPost] = useState<RadarPost | null>(null);
   const [postDrafts, setPostDrafts] = useState<Record<string, PostDraft>>({});
+  const [translatingPostId, setTranslatingPostId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const draftSettingsDirtyRef = useRef(false);
 
@@ -222,11 +274,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    window.radarApi?.onAlertSound(async () => {
+    window.radarApi.onAlertSound(async () => {
       try {
         await playBeep();
       } catch (error) {
-        window.radarApi?.command("ui-log", `声音播放失败：${String(error)}`);
+        window.radarApi.command("ui-log", `声音播放失败：${String(error)}`);
       }
     });
   }, []);
@@ -292,7 +344,11 @@ function App() {
       if (filterMode === "unhandled" && post.handled) return false;
       if (filterMode === "handled" && !post.handled) return false;
       if (post.score < minScore) return false;
-      const text = `${post.groupName} ${post.authorName} ${post.postText} ${post.matchedKeywords.join(" ")} ${post.remark || ""}`.toLowerCase();
+      if (dateFilter) {
+        const matchesDate = dateKeyFromText(post.collectedAt) === dateFilter || dateKeyFromText(post.parsedPostTime) === dateFilter;
+        if (!matchesDate) return false;
+      }
+      const text = `${post.groupName} ${post.authorName} ${post.postText} ${post.matchedKeywords.join(" ")} ${post.remark || ""} ${post.translatedText || ""}`.toLowerCase();
       return text.includes(query.toLowerCase());
     });
 
@@ -304,7 +360,7 @@ function App() {
       if (sortMode === "collectedAt") return b.collectedAt.localeCompare(a.collectedAt);
       return (bTime - aTime) || (b.score - a.score) || b.collectedAt.localeCompare(a.collectedAt);
     });
-  }, [filterMode, minScore, query, sortMode, state.posts]);
+  }, [dateFilter, filterMode, minScore, query, sortMode, state.posts]);
 
   const updatePostDraft = (post: RadarPost, patch: Partial<PostDraft>) => {
     setPostDrafts((drafts) => ({
@@ -317,14 +373,28 @@ function App() {
     }));
   };
 
-  const savePostMeta = async (post: RadarPost, handled = true) => {
+  const savePostMeta = async (post: RadarPost, handled = Boolean(post.handled)) => {
     const draft = postDrafts[post.postId];
     await command("mark-handled", {
       postId: post.postId,
       handled,
       handledColor: draft?.color || post.handledColor || "#d9f2e6",
       remark: draft?.remark ?? post.remark ?? ""
-    }, handled ? "已更新处理状态" : "已保存备注");
+    }, handled ? "已更新处理状态" : "备注已保存");
+  };
+
+  const translatePost = async (post: RadarPost) => {
+    setTranslatingPostId(post.postId);
+    try {
+      const result = await command("translate-post", post.postId, undefined, { silent: true });
+      if (result?.ok === false || result?.success === false) {
+        notify(result?.message || "翻译失败");
+      } else {
+        notify("翻译完成");
+      }
+    } finally {
+      setTranslatingPostId("");
+    }
   };
 
   const addKeyword = () => {
@@ -432,7 +502,7 @@ function App() {
       <header className="topbar">
         <div>
           <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.14"}</span></h1>
-          <p>仅采集当前已打开的 Facebook 首页、groups/feed 或群组页面，不会自动评论或执行发帖操作。</p>
+          <p>仅采集当前已打开的 Facebook 首页、groups/feed 或群组页面，不会自动评论或发帖。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}><Radio size={18} />{socketReady ? "本地服务已连接" : "本地服务未连接"}</div>
       </header>
@@ -483,7 +553,7 @@ function App() {
         <div className="panel-head"><h2>翻译设置</h2><span>{draftSettings.translation.apiKey || draftSettings.translation.apiType === "local" ? "已配置" : "未配置"}</span></div>
         <div className="settings-grid">
           <label className="field"><span>启用翻译</span><input type="checkbox" checked={draftSettings.translation.enabled} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, enabled: event.target.checked } }))} /></label>
-          <label className="field"><span>API 类型</span><select value={draftSettings.translation.apiType} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, apiType: event.target.value as RadarSettings["translation"]["apiType"] } }))}><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI Compatible</option><option value="local">Local API</option></select></label>
+          <label className="field"><span>API 类型</span><select value={draftSettings.translation.apiType} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: applyTranslationPreset(settings.translation, event.target.value as RadarSettings["translation"]["apiType"]) }))}><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI Compatible</option><option value="deepseek">DeepSeek</option><option value="local">Local API</option></select></label>
           <label className="field"><span>API Key</span><input type="password" value={draftSettings.translation.apiKey} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, apiKey: event.target.value } }))} placeholder="sk-..." /></label>
           <label className="field"><span>Base URL</span><input value={draftSettings.translation.baseUrl} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, baseUrl: event.target.value } }))} /></label>
           <label className="field"><span>模型</span><input value={draftSettings.translation.model} onChange={(event) => updateSettings((settings) => ({ ...settings, translation: { ...settings.translation, model: event.target.value } }))} /></label>
@@ -580,6 +650,8 @@ function App() {
               <option value={60}>最低评分 60</option>
               <option value={80}>最低评分 80</option>
             </select>
+            <input type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} />
+            <button onClick={() => setDateFilter("")}>清空日期</button>
           </div>
         </div>
         <div className="table-hint">表格支持左右滚动；缩小窗口时建议拖动底部横向滚动条查看完整列。</div>
@@ -591,10 +663,10 @@ function App() {
                 <th>评分</th>
                 <th>新帖</th>
                 <th>群组</th>
+                <th>内容摘要</th>
                 <th>发帖人</th>
                 <th>发布时间</th>
                 <th>采集时间</th>
-                <th>内容摘要</th>
                 <th>关键词</th>
                 <th>备注</th>
                 <th>处理色</th>
@@ -606,16 +678,27 @@ function App() {
                 const draft = postDrafts[post.postId];
                 const rowColor = draft?.color || post.handledColor || "#d9f2e6";
                 const remark = draft?.remark ?? post.remark ?? "";
+                const translated = post.translatedText || "";
+                const postTime = displayPostTime(post);
                 return (
                   <tr key={post.postId} className={post.alertTriggered || post.isNewPost ? "alert-row" : ""} style={post.handled ? { background: rowColor } : undefined}>
                     <td className="sticky-col">{post.handled ? "已处理" : (post.alertTriggered ? "已提醒" : post.statusNote)}</td>
                     <td><strong>{post.score}</strong></td>
                     <td>{post.isNewPost ? "是" : "否"}</td>
                     <td>{post.groupName}</td>
+                    <td className="preview-cell">
+                      <div className="summary-tools">
+                        <span>{post.postTextPreview}</span>
+                        <button disabled={translatingPostId === post.postId} onClick={() => translatePost(post)}>{translatingPostId === post.postId ? "翻译中" : "翻译"}</button>
+                      </div>
+                      {translated && <div className="translated-text">{translated}</div>}
+                    </td>
                     <td>{post.authorName || "未识别"}</td>
-                    <td>{post.rawTimeText || post.parsedPostTime || "未识别"}</td>
+                    <td>
+                      <div>{postTime.primary}</div>
+                      {postTime.secondary && <div className="time-secondary">{postTime.secondary}</div>}
+                    </td>
                     <td>{post.collectedAt}</td>
-                    <td className="preview-cell">{post.postTextPreview}</td>
                     <td>{post.matchedKeywords.join(", ") || "无"}</td>
                     <td>
                       <input className="note-input" value={remark} placeholder="备注" onChange={(event) => updatePostDraft(post, { remark: event.target.value })} />
@@ -627,6 +710,8 @@ function App() {
                       <button title="打开帖子" onClick={() => command("open-url", post.postUrl)}><Eye size={15} /></button>
                       <button title="复制链接" onClick={() => { navigator.clipboard.writeText(post.postUrl); command("ui-log", `已复制帖子链接：${post.postUrl}`); notify("链接已复制"); }}><Copy size={15} /></button>
                       <button onClick={() => savePostMeta(post, true)}>已处理</button>
+                      <button onClick={() => savePostMeta(post, Boolean(post.handled))}>保存备注</button>
+                      <button onClick={() => command("clear-handled", post.postId, "已清除处理标记")}>清除标记</button>
                       <button onClick={() => command("ignore-post", post.postId)}>忽略</button>
                       <button onClick={() => { setSelectedPost(post); command("ui-log", `查看帖子详情：${post.postUrl || post.postId}`); }}>详情</button>
                     </td>
@@ -655,6 +740,7 @@ function App() {
           <h2>帖子详情</h2>
           <dl>
             <dt>完整内容</dt><dd>{selectedPost.postText}</dd>
+            <dt>翻译内容</dt><dd>{selectedPost.translatedText || "未翻译"}</dd>
             <dt>群组</dt><dd>{selectedPost.groupName}</dd>
             <dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd>
             <dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd>
@@ -670,7 +756,9 @@ function App() {
           <div className="inline-actions">
             <button onClick={() => command("open-url", selectedPost.postUrl)}>打开帖子</button>
             <button onClick={() => { navigator.clipboard.writeText(selectedPost.postUrl); command("ui-log", `已复制帖子链接：${selectedPost.postUrl}`); }}>复制链接</button>
+            <button onClick={() => translatePost(selectedPost)}>翻译本条</button>
             <button onClick={() => savePostMeta(selectedPost, true)}>标记已处理</button>
+            <button onClick={() => command("clear-handled", selectedPost.postId, "已清除处理标记")}>清除标记</button>
           </div>
         </aside>
       </div>}

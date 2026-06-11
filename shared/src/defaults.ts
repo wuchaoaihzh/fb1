@@ -1,4 +1,4 @@
-import type { RadarSettings, KeywordItem } from "./types.js";
+import type { KeywordItem, RadarSettings } from "./types.js";
 
 const highValue = [
   "looking for supplier",

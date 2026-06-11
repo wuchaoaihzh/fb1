@@ -37,6 +37,7 @@ export interface RadarPost {
   handledAt?: string;
   handledColor?: string;
   remark?: string;
+  translatedText?: string;
 }
 
 export interface AlertSettings {
@@ -77,7 +78,7 @@ export interface GroupMonitorSettings {
 
 export interface TranslationSettings {
   enabled: boolean;
-  apiType: "openai" | "openai-compatible" | "local";
+  apiType: "openai" | "openai-compatible" | "deepseek" | "local";
   apiKey: string;
   baseUrl: string;
   model: string;

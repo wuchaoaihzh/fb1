@@ -502,6 +502,41 @@ th {
   max-width: 420px;
 }
 
+.summary-tools {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.summary-tools span {
+  flex: 1;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.summary-tools button {
+  flex-shrink: 0;
+  min-width: 58px;
+  padding: 6px 10px;
+}
+
+.translated-text {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #d3ddd8;
+  color: #446067;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.time-secondary {
+  margin-top: 4px;
+  color: #64767b;
+  font-size: 12px;
+}
+
 .note-input {
   min-width: 160px;
 }

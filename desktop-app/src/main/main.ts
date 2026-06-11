@@ -9,6 +9,7 @@ import * as XLSX from "xlsx";
 import {
   defaultSettings,
   dedupeKey,
+  formatDateKey,
   formatLocalDateTime,
   parseFacebookTime,
   scorePost,
@@ -94,6 +95,8 @@ const commandLabels: Record<string, string> = {
   "clear-logs": "清空日志",
   "open-url": "打开帖子",
   "mark-handled": "标记已处理",
+  "clear-handled": "清除处理标记",
+  "translate-post": "翻译本条帖子",
   "ignore-post": "忽略帖子",
   "update-settings": "保存设置",
   "test-translation": "测试翻译",
@@ -190,7 +193,7 @@ function persistSettings(): void {
 }
 
 function stats(): RadarStats {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = formatDateKey(new Date());
   const values = [...posts.values()];
   return {
     totalPosts: values.length,
@@ -519,6 +522,13 @@ function maybeAlert(post: RadarPost): RadarPost {
   return alerted;
 }
 
+function normalizeDateTimeInput(value?: string): string {
+  if (!value) return formatLocalDateTime(new Date());
+  const normalized = value.replace(" ", "T").replace(/\.(\d{2})\.(\d{2})$/, ":$1:$2");
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? value : formatLocalDateTime(parsed);
+}
+
 function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost {
   const rawTimeText = input.rawTimeText || "";
   const parsedTime = parseFacebookTime(rawTimeText);
@@ -551,10 +561,11 @@ function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost 
     score: scored.score,
     scoreReasons: scored.scoreReasons,
     alertTriggered: input.alertTriggered || false,
-    collectedAt: input.collectedAt || formatLocalDateTime(new Date()),
+    collectedAt: normalizeDateTimeInput(input.collectedAt),
     sourceWindowId: input.sourceWindowId || clientId,
     sourceAccountNote: input.sourceAccountNote || "",
-    statusNote
+    statusNote,
+    translatedText: input.translatedText || ""
   });
 }
 
@@ -600,12 +611,13 @@ function exportRows() {
     采集时间: post.collectedAt,
     来源窗口: post.sourceWindowId,
     状态备注: post.statusNote,
-    用户备注: post.remark || ""
+    用户备注: post.remark || "",
+    翻译内容: post.translatedText || ""
   }));
 }
 
 function timestampName(ext: string): string {
-  const stamp = formatLocalDateTime(new Date()).replace(/:/g, "-").replace(" ", "_");
+  const stamp = formatLocalDateTime(new Date()).replace(/\./g, "-").replace(" ", "_");
   return path.join(exportDir(), `facebook_posts_${stamp}.${ext}`);
 }
 
@@ -629,6 +641,41 @@ async function exportXlsx(): Promise<string> {
   XLSX.writeFile(workbook, file);
   log("Excel exported", file);
   return file;
+}
+
+function translationEndpoint(translation: RadarSettings["translation"]): string {
+  return `${translation.baseUrl.replace(/\/$/, "")}/chat/completions`;
+}
+
+async function requestTranslation(text: string): Promise<string> {
+  const translation = settings.translation;
+  if (!text.trim()) throw new Error("没有可翻译的内容");
+  if (!translation.apiKey && translation.apiType !== "local") {
+    throw new Error("翻译 API Key 未配置");
+  }
+  if (!translation.baseUrl) {
+    throw new Error("翻译 Base URL 未配置");
+  }
+  const response = await fetch(translationEndpoint(translation), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(translation.apiKey ? { Authorization: `Bearer ${translation.apiKey}` } : {})
+    },
+    body: JSON.stringify({
+      model: translation.model,
+      messages: [
+        { role: "system", content: `Translate the user text to ${translation.targetLanguage}. Return only the translation.` },
+        { role: "user", content: text }
+      ],
+      temperature: 0
+    })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const translated = data.choices?.[0]?.message?.content?.trim();
+  if (!translated) throw new Error("API 没有返回翻译内容");
+  return translated;
 }
 
 function startLocalServer(): void {
@@ -766,21 +813,38 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     return { ok: true, success: true, clearedCount: count, message: `已清空当前数据，共清除 ${count} 条帖子` };
   }
   if (command === "mark-handled" && (typeof payload === "string" || typeof payload === "object")) {
-    const request = typeof payload === "string" ? { postId: payload } : (payload as { postId?: string; handledColor?: string; remark?: string });
+    const request = typeof payload === "string" ? { postId: payload, handled: true } : (payload as { postId?: string; handled?: boolean; handledColor?: string; remark?: string });
     const post = [...posts.values()].find((item) => item.postId === request.postId);
+    if (post) {
+      const nextHandled = request.handled !== false;
+      posts.set(dedupeKey(post), {
+        ...post,
+        handled: nextHandled,
+        handledAt: nextHandled ? formatLocalDateTime(new Date()) : undefined,
+        handledColor: nextHandled ? (request.handledColor || post.handledColor || "#d9f2e6") : undefined,
+        remark: typeof request.remark === "string" ? request.remark : post.remark,
+        statusNote: nextHandled ? "已处理" : (post.alertTriggered ? "已提醒" : (post.timeConfidence === "unknown" ? "时间未识别，需要人工确认" : "正常"))
+      });
+      persistPosts();
+      addOperation(nextHandled ? `帖子已标记处理：${post.postUrl || post.postId}` : `帖子已清除处理标记：${post.postUrl || post.postId}`, "success");
+    } else {
+      addOperation(`标记已处理失败：未找到帖子 ${request.postId || ""}`, "error");
+    }
+  }
+  if (command === "clear-handled" && typeof payload === "string") {
+    const post = [...posts.values()].find((item) => item.postId === payload);
     if (post) {
       posts.set(dedupeKey(post), {
         ...post,
-        handled: true,
-        handledAt: formatLocalDateTime(new Date()),
-        handledColor: request.handledColor || post.handledColor || "#d9f2e6",
-        remark: typeof request.remark === "string" ? request.remark : post.remark,
-        statusNote: "已处理"
+        handled: false,
+        handledAt: undefined,
+        handledColor: undefined,
+        statusNote: post.alertTriggered ? "已提醒" : (post.timeConfidence === "unknown" ? "时间未识别，需要人工确认" : "正常")
       });
       persistPosts();
-      addOperation(`帖子已标记处理：${post.postUrl || post.postId}`, "success");
+      addOperation(`帖子已清除处理标记：${post.postUrl || post.postId}`, "success");
     } else {
-      addOperation(`标记已处理失败：未找到帖子 ${request.postId || ""}`, "error");
+      addOperation(`清除处理标记失败：未找到帖子 ${payload}`, "error");
     }
   }
   if (command === "ignore-post" && typeof payload === "string") {
@@ -865,36 +929,28 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     addOperation(`设置已保存；群组数量：${settings.groupMonitor.groups.length}`, "success");
     broadcastToExtensions({ type: "settings_updated", payload: settings });
   }
-  if (command === "test-translation") {
-    const translation = settings.translation;
-    if (!translation.apiKey && translation.apiType !== "local") {
-      addOperation("测试翻译失败：API Key 未配置", "error");
-      return { ok: false, message: "测试失败：API Key 未配置" };
-    }
-    if (!translation.baseUrl) {
-      addOperation("测试翻译失败：Base URL 未配置", "error");
-      return { ok: false, message: "测试失败：Base URL 未配置" };
+  if (command === "translate-post" && typeof payload === "string") {
+    const post = [...posts.values()].find((item) => item.postId === payload);
+    if (!post) {
+      addOperation(`翻译失败：未找到帖子 ${payload}`, "error");
+      return { ok: false, message: `未找到帖子 ${payload}` };
     }
     try {
-      const response = await fetch(`${translation.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(translation.apiKey ? { Authorization: `Bearer ${translation.apiKey}` } : {})
-        },
-        body: JSON.stringify({
-          model: translation.model,
-          messages: [
-            { role: "system", content: `Translate the user text to ${translation.targetLanguage}. Return only the translation.` },
-            { role: "user", content: "Looking for supplier for wholesale custom product." }
-          ],
-          temperature: 0
-        })
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-      const translated = data.choices?.[0]?.message?.content?.trim();
-      if (!translated) throw new Error("API 没有返回翻译内容");
+      const translated = await requestTranslation(post.postText);
+      posts.set(dedupeKey(post), { ...post, translatedText: translated });
+      persistPosts();
+      broadcastState();
+      addOperation(`帖子翻译完成：${post.postUrl || post.postId}`, "success");
+      return { ok: true, message: translated };
+    } catch (error) {
+      const message = `帖子翻译失败：${String(error instanceof Error ? error.message : error)}`;
+      addOperation(message, "error");
+      return { ok: false, message };
+    }
+  }
+  if (command === "test-translation") {
+    try {
+      const translated = await requestTranslation("Looking for supplier for wholesale custom product.");
       addOperation(`测试翻译成功：${translated}`, "success");
       return { ok: true, message: translated };
     } catch (error) {
