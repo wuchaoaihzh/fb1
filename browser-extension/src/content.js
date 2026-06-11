@@ -567,10 +567,13 @@ function sendAck(commandId, commandType, success, message, currentState, details
 async function startAutoScroll(commandId, total, delayMs) {
   autoScrollStopped = false;
   collecting = true;
+  startCollectLoop();
+  const initialPosts = collectVisiblePosts();
   sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前滑动次数：0 / ${total}`, "auto_scrolling", {
     currentStep: 0,
     totalSteps: total,
-    delayMs
+    delayMs,
+    collectedCount: initialPosts.length
   });
 
   for (let current = 1; current <= total; current += 1) {
@@ -584,7 +587,6 @@ async function startAutoScroll(commandId, total, delayMs) {
     }
 
     const scrollResult = await tryScrollOnce();
-    await wait(delayMs);
     const posts = collectVisiblePosts();
     sendAck(
       commandId,
@@ -602,6 +604,7 @@ async function startAutoScroll(commandId, total, delayMs) {
       }
     );
     if (!scrollResult.ok) return;
+    await wait(delayMs);
   }
 
   sendAck(commandId, "start_auto_scroll", true, "自动滚动已完成", "collecting", {

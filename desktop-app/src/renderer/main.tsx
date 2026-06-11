@@ -76,7 +76,7 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.11", operationLog: [], stats: emptyStats, clients: [] });
+  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.12", operationLog: [], stats: emptyStats, clients: [] });
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
@@ -148,7 +148,7 @@ function App() {
   useEffect(() => {
     const latest = state.operationLog[0];
     if (!latest) return;
-    if (latest.message.startsWith("插件确认：") || latest.message.includes("失败") || latest.message.startsWith("本次扫描：")) {
+    if (latest.level === "error" || latest.message.includes("未收到插件 ACK") || latest.message.includes("插件已断开")) {
       notify(latest.message);
     }
   }, [state.operationLog]);
@@ -161,8 +161,8 @@ function App() {
   const command = async (name: string, payload?: unknown, feedback?: string, options?: { silent?: boolean }) => {
     if (feedback && !options?.silent) notify(feedback);
     const result = await window.radarApi?.command(name, payload) as { sent?: boolean; ack?: boolean; success?: boolean; message?: string; ok?: boolean } | undefined;
-    if (result?.message && !options?.silent) {
-      notify(result.success === false || result.ok === false ? `操作失败：${result.message}` : result.message);
+    if ((result?.success === false || result?.ok === false) && result?.message && !options?.silent) {
+      notify(`操作失败：${result.message}`);
     } else if (result?.sent === false && !options?.silent) {
       notify("命令发送失败，请查看运行日志");
     }
@@ -305,7 +305,7 @@ function App() {
       {toast && <div className="toast">{toast}</div>}
       <header className="topbar">
         <div>
-          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.11"}</span></h1>
+          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.12"}</span></h1>
           <p>只读取当前浏览器已登录且可见的 Facebook 群组页面，不自动评论，不绕过权限。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}><Radio size={18} />{socketReady ? "本地服务已连接" : "本地服务未连接"}</div>
