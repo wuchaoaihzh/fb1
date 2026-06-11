@@ -217,6 +217,8 @@ function visibleText(element) {
   return (element?.innerText || element?.textContent || "").replace(/\s+/g, " ").trim();
 }
 
+const TIME_CANDIDATE_SELECTOR = "time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime], [aria-describedby], [aria-labelledby]";
+
 function normalizeTimeCandidateText(value) {
   return String(value || "")
     .replace(/\u00A0|\u202F/g, " ")
@@ -395,7 +397,7 @@ function findPhotoPostContext(container) {
     if (isVisibleElement(current)) {
       const text = visibleText(current);
       if (text.length >= 20) best = current;
-      const hasTime = [...current.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
+      const hasTime = [...current.querySelectorAll(TIME_CANDIDATE_SELECTOR)]
         .some((element) => extractTimeFragment(
           element.getAttribute("aria-label") ||
           element.getAttribute("title") ||
@@ -826,7 +828,7 @@ function findPhotoStoryFallback() {
 }
 
 function fallbackContainersFromTimeMarkers() {
-  return [...document.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime], [aria-describedby]")]
+  return [...document.querySelectorAll(TIME_CANDIDATE_SELECTOR)]
     .filter((element) => isVisibleElement(element))
     .filter((element) => {
       const marker = [
@@ -1000,7 +1002,7 @@ async function findRawTime(container) {
       if (fragment) return fragment;
     }
   }
-  const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime], [aria-describedby]")]
+  const candidates = [...container.querySelectorAll(TIME_CANDIDATE_SELECTOR)]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
       const orderedText = isFacebookPhotoPage() ? orderedVisibleText(element) : "";
@@ -1065,7 +1067,7 @@ function findAuthor(container, rawTimeText = "", sourceName = "") {
       if (profileLinkName?.text) return profileLinkName.text;
     }
   }
-  const timeCandidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
+  const timeCandidates = [...container.querySelectorAll(TIME_CANDIDATE_SELECTOR)]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
       const value = [
@@ -1364,7 +1366,9 @@ function relatedTooltipNodes(target) {
   let depth = 0;
   while (current && depth < 6) {
     const describedBy = current.getAttribute?.("aria-describedby");
+    const labelledBy = current.getAttribute?.("aria-labelledby");
     if (describedBy) ids.push(...String(describedBy).split(/\s+/));
+    if (labelledBy) ids.push(...String(labelledBy).split(/\s+/));
     current = current.parentElement;
     depth += 1;
   }
