@@ -1,10 +1,8 @@
-const LOCAL_WS = "ws://127.0.0.1:8765";
 const LOCAL_HEALTH = "http://127.0.0.1:8765/health";
 const LOCAL_HEARTBEAT = "http://127.0.0.1:8765/client-heartbeat";
 const LOCAL_POSTS = "http://127.0.0.1:8765/posts";
 const LOCAL_ACK = "http://127.0.0.1:8765/command-ack";
 
-let socket = null;
 let clientId = `ext-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 let connected = false;
 let latestSettings = null;
@@ -164,7 +162,6 @@ async function postAck(ack) {
     clientId,
     timestamp: new Date().toISOString()
   };
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
   try {
     await fetch(LOCAL_ACK, {
       method: "POST",
@@ -172,7 +169,7 @@ async function postAck(ack) {
       body: JSON.stringify(payload)
     });
   } catch {
-    // WebSocket may already have delivered the ACK.
+    // Desktop app is not reachable; heartbeat will retry.
   }
 }
 
@@ -324,12 +321,6 @@ function startHeartbeat() {
   stopHeartbeat();
   heartbeatTimer = setInterval(() => {
     heartbeatToLocal();
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      stopHeartbeat();
-      scheduleReconnect();
-      return;
-    }
-    socket.send(JSON.stringify({ type: "ping", clientId }));
   }, 4000);
 }
 
@@ -343,51 +334,31 @@ async function isDesktopAvailable() {
 }
 
 async function connect() {
-  if (socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(socket.readyState)) return;
   if (!(await isDesktopAvailable())) {
     setConnected(false);
     scheduleReconnect();
     return;
   }
-
-  socket = new WebSocket(LOCAL_WS);
-  socket.addEventListener("open", () => {
-    setConnected(true);
-    heartbeatToLocal();
-    startHeartbeat();
-    socket.send(JSON.stringify({ type: "extension_connected", clientId, payload: { userAgent: navigator.userAgent } }));
-  });
-  socket.addEventListener("message", (event) => runExtensionCommand(JSON.parse(event.data)));
-  socket.addEventListener("close", () => {
-    setConnected(false);
-    stopHeartbeat();
-    scheduleReconnect();
-  });
-  socket.addEventListener("error", () => {
-    setConnected(false);
-    socket?.close();
-  });
+  setConnected(true);
+  await heartbeatToLocal();
+  startHeartbeat();
 }
 
 async function sendToLocal(message) {
   await connect();
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    try {
-      const body = message.type === "posts_batch_collected" ? { clientId, posts: message.payload } : { clientId, post: message.payload };
-      const response = await fetch(LOCAL_POSTS, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      if (!response.ok) throw new Error(`Post failed: ${response.status}`);
-      await heartbeatToLocal();
-      return true;
-    } catch {
-      return false;
-    }
+  try {
+    const body = message.type === "posts_batch_collected" ? { clientId, posts: message.payload } : { clientId, post: message.payload };
+    const response = await fetch(LOCAL_POSTS, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`Post failed: ${response.status}`);
+    await heartbeatToLocal();
+    return true;
+  } catch {
+    return false;
   }
-  socket.send(JSON.stringify({ ...message, clientId }));
-  return true;
 }
 
 chrome.runtime.onInstalled.addListener(connect);

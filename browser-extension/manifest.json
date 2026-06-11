@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Facebook Opportunity Radar Connector",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Collects currently visible Facebook group posts and sends them to the local Radar desktop app.",
   "permissions": ["activeTab", "scripting", "storage", "tabs", "debugger"],
   "host_permissions": [

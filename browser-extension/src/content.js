@@ -38,6 +38,20 @@ function safeSendMessage(message) {
   });
 }
 
+window.addEventListener("error", (event) => {
+  if (String(event.message || "").includes("Extension context invalidated")) {
+    stopAllLocalWork();
+    event.preventDefault();
+  }
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  if (String(event.reason?.message || event.reason || "").includes("Extension context invalidated")) {
+    stopAllLocalWork();
+    event.preventDefault();
+  }
+});
+
 const noiseTexts = new Set([
   "facebook",
   "home",
