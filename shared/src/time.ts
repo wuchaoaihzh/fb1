@@ -172,6 +172,22 @@ function parseEnglishMonthTime(text: string, now: Date): ParsedTimeResult | null
   return toParsedResult(coerceRecentDate(parsed, now, Boolean(match[3])), now, "medium");
 }
 
+function parseEnglishDayMonthTime(text: string, now: Date): ParsedTimeResult | null {
+  const match = normalizeAbsoluteTimeText(text).match(
+    new RegExp(`^(\\d{1,2})\\s+${monthTokenPattern}(?:,\\s*(\\d{4}))?(?:\\s+(?:at\\s+)?(\\d{1,2})(?::(\\d{2}))?\\s*([AP]M))?$`, "i")
+  );
+  if (!match) return null;
+  const day = Number(match[1]);
+  const monthIndex = monthMap.get(match[2].toLowerCase());
+  if (monthIndex === undefined) return null;
+  const year = match[3] ? Number(match[3]) : now.getFullYear();
+  const hour = adjustHour(match[4] ? Number(match[4]) : 0, match[6] || undefined);
+  const minute = match[5] ? Number(match[5]) : 0;
+  const parsed = new Date(year, monthIndex, day, hour, minute, 0, 0);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return toParsedResult(coerceRecentDate(parsed, now, Boolean(match[3])), now, "medium");
+}
+
 function parseChineseAbsoluteTime(text: string, now: Date): ParsedTimeResult | null {
   const match = normalizeAbsoluteTimeText(text).match(
     /^(?:(\d{4})年\s*)?(\d{1,2})月(\d{1,2})日(?:\s*(上午|下午|中午|晚上|早上)?\s*(\d{1,2})(?:[:：](\d{2}))?)?$/
@@ -261,6 +277,7 @@ function parseGenericDate(text: string, now: Date): ParsedTimeResult | null {
 function extractAbsoluteTimeFragment(text: string): string {
   const normalized = normalizeAbsoluteTimeText(text);
   const patterns = [
+    new RegExp(`\\d{1,2}\\s+${monthTokenPattern}(?:,\\s*\\d{4})?(?:\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*[AP]M)?`, "i"),
     new RegExp(`${monthTokenPattern}\\s+\\d{1,2}(?:,\\s*\\d{4})?(?:\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*[AP]M)?`, "i"),
     /(?:\d{4}年\s*)?\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?:[:：]\d{2})?)?/,
     /(?:Today|Yesterday|Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Tues(?:day)?|Wed(?:nesday)?|Thu(?:rsday)?|Thur(?:sday)?|Fri(?:day)?|Sat(?:urday)?|今天|昨天|周[一二三四五六日天]|星期[一二三四五六日天])(?:\s+(?:at\s+)?)?(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?::\d{2})?\s*(?:[AP]M)?/i,
@@ -276,6 +293,7 @@ function extractAbsoluteTimeFragment(text: string): string {
 function parseAbsoluteTime(text: string, now: Date): ParsedTimeResult | null {
   const fragment = extractAbsoluteTimeFragment(text);
   return (
+    parseEnglishDayMonthTime(fragment, now) ||
     parseEnglishMonthTime(fragment, now) ||
     parseChineseAbsoluteTime(fragment, now) ||
     parseWeekdayTime(fragment, now) ||

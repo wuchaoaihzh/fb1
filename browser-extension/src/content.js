@@ -363,6 +363,15 @@ function findPhotoPostContext(container) {
   return best;
 }
 
+function firstTopSectionRow(container) {
+  return [...container.children].find((child) => isVisibleElement(child) && isInTopSection(container, child)) || null;
+}
+
+function secondTopSectionRow(container) {
+  const rows = [...container.children].filter((child) => isVisibleElement(child) && isInTopSection(container, child));
+  return rows[1] || rows[0] || null;
+}
+
 function findSourceLink(container) {
   const candidates = [...container.querySelectorAll("a[href*='/groups/']")]
     .filter((anchor) => isVisibleElement(anchor))
@@ -511,6 +520,16 @@ function findPostUrl(container) {
 
 function findRawTime(container) {
   const preferredPostUrl = findPostUrl(container);
+  if (isFacebookPhotoPage()) {
+    const textRows = [secondTopSectionRow(container), firstTopSectionRow(container), container]
+      .filter(Boolean)
+      .flatMap((element) => visibleLines(element));
+    const exactLine = textRows.find((line) => /\b\d{1,2}\s+(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December)\b/i.test(line));
+    if (exactLine) {
+      const fragment = extractTimeFragment(exactLine);
+      if (fragment) return fragment;
+    }
+  }
   const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
@@ -546,6 +565,19 @@ function findRawTime(container) {
 }
 
 function findAuthor(container, rawTimeText = "", sourceName = "") {
+  if (isFacebookPhotoPage()) {
+    const headerRow = secondTopSectionRow(container) || firstTopSectionRow(container);
+    if (headerRow) {
+      const strongName = [...headerRow.querySelectorAll("strong, h1, h2, h3, h4")]
+        .map((element) => visibleText(element))
+        .find((text) => text && !looksLikeTime(text) && !isNoiseLine(text) && !isViewPostText(text));
+      if (strongName) return strongName;
+      const profileLinkName = [...headerRow.querySelectorAll("a[href]")]
+        .map((element) => ({ text: visibleText(element), href: normalizeUrl(element.href || "") }))
+        .find(({ text, href }) => text && isProfileLikeHref(href) && !looksLikeTime(text) && !isNoiseLine(text) && !isViewPostText(text));
+      if (profileLinkName?.text) return profileLinkName.text;
+    }
+  }
   const timeCandidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
