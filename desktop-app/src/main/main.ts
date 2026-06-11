@@ -24,7 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const serverPort = 8765;
-const appVersion = "0.1.3";
+const appVersion = "0.1.4";
 app.setName("Facebook Opportunity Radar");
 
 let mainWindow: BrowserWindow | null = null;

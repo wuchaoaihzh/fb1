@@ -3,7 +3,40 @@ let autoScrollStopped = false;
 let monitorTimer = null;
 let latestSettings = null;
 let collectTimer = null;
+let contextActive = true;
+let feedObserver = null;
 const seenKeys = new Set();
+
+function stopAllLocalWork() {
+  contextActive = false;
+  collecting = false;
+  autoScrollStopped = true;
+  if (collectTimer) clearInterval(collectTimer);
+  if (monitorTimer) clearInterval(monitorTimer);
+  collectTimer = null;
+  monitorTimer = null;
+  if (feedObserver) feedObserver.disconnect();
+}
+
+function safeSendMessage(message) {
+  if (!contextActive || !chrome?.runtime?.id) return Promise.resolve({ ok: false, error: "extension_context_invalidated" });
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          if (String(error.message || "").includes("Extension context invalidated")) stopAllLocalWork();
+          resolve({ ok: false, error: error.message });
+          return;
+        }
+        resolve(response || { ok: true });
+      });
+    } catch (error) {
+      if (String(error?.message || error).includes("Extension context invalidated")) stopAllLocalWork();
+      resolve({ ok: false, error: String(error?.message || error) });
+    }
+  });
+}
 
 const noiseTexts = new Set([
   "facebook",
@@ -233,7 +266,7 @@ function shouldKeepPost(post) {
 }
 
 function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {}) {
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: "command_ack",
     commandId: `scan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     commandType: "scan_result",
@@ -247,6 +280,7 @@ function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {
 }
 
 function collectVisiblePosts({ allowSeen = false } = {}) {
+  if (!contextActive) return [];
   if (!collecting) return [];
   const scanned = likelyPostContainers()
     .map(extractPost)
@@ -268,7 +302,7 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
     return true;
   });
   sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { ignoredReasons, sentCount: fresh.length });
-  if (fresh.length > 0) chrome.runtime.sendMessage({ type: "posts_batch_collected", payload: fresh });
+  if (fresh.length > 0) safeSendMessage({ type: "posts_batch_collected", payload: fresh });
   return fresh;
 }
 
@@ -420,7 +454,7 @@ async function tryScrollOnce(preferredDistance) {
 }
 
 function sendAck(commandId, commandType, success, message, currentState, details = {}) {
-  chrome.runtime.sendMessage({
+  safeSendMessage({
     type: "command_ack",
     commandId,
     commandType,
@@ -592,5 +626,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 window.addEventListener("scroll", () => setTimeout(collectVisiblePosts, 900));
-new MutationObserver(() => setTimeout(collectVisiblePosts, 1200)).observe(document.documentElement, { childList: true, subtree: true });
+feedObserver = new MutationObserver(() => setTimeout(collectVisiblePosts, 1200));
+feedObserver.observe(document.documentElement, { childList: true, subtree: true });
 setTimeout(collectVisiblePosts, 1500);

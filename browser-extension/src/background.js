@@ -81,6 +81,33 @@ async function sendToFacebookTab(message) {
   }
 }
 
+async function debuggerMouseWheel(tabId, distance = Math.floor(600 + Math.random() * 600)) {
+  if (!chrome.debugger) {
+    return { ok: false, error: "当前浏览器不支持 chrome.debugger API" };
+  }
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, "1.3");
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x: 600,
+      y: 420,
+      deltaX: 0,
+      deltaY: distance,
+      pointerType: "mouse"
+    });
+    return { ok: true, method: "cdp-debugger-mouseWheel", distance };
+  } catch (error) {
+    return { ok: false, error: `CDP mouseWheel 失败：${String(error?.message || error)}`, method: "cdp-debugger-mouseWheel" };
+  } finally {
+    try {
+      await chrome.debugger.detach(target);
+    } catch {
+      // Ignore detach failures.
+    }
+  }
+}
+
 async function sendToAllFacebookTabs(message) {
   const tabs = await listFacebookTabs();
   if (tabs.length === 0) {
@@ -96,7 +123,17 @@ async function sendToAllFacebookTabs(message) {
         await chrome.tabs.sendMessage(tab.id, { type: "settings_updated", payload: latestSettings }).catch(() => undefined);
       }
       const response = await chrome.tabs.sendMessage(tab.id, { ...message, targetTabId: tab.id, targetTabUrl: tab.url });
-      results.push({ ok: response?.ok !== false, ...response, tabId: tab.id, url: tab.url, title: tab.title });
+      let tabResult = { ok: response?.ok !== false, ...response, tabId: tab.id, url: tab.url, title: tab.title };
+      if (message.type === "test_scroll_once" && tabResult.ok === false) {
+        const debuggerResult = await debuggerMouseWheel(tab.id);
+        tabResult = {
+          ...tabResult,
+          ok: debuggerResult.ok,
+          message: debuggerResult.ok ? "CDP mouseWheel 后台滚动命令已发送" : tabResult.message || tabResult.error || debuggerResult.error,
+          debuggerResult
+        };
+      }
+      results.push(tabResult);
     } catch (error) {
       results.push({
         ok: false,
