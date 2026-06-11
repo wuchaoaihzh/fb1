@@ -22,6 +22,8 @@ let observerCollectTimer = null;
 let monitorReloadTimer = null;
 let latestSettings = null;
 let contextActive = true;
+let cachedPageReferenceTimeMs = null;
+const storyFallbackCache = new Map();
 const seenKeys = new Set();
 
 function stopAllLocalWork() {
@@ -222,6 +224,42 @@ function visibleLines(element) {
     .filter(Boolean);
 }
 
+function orderedVisibleText(element) {
+  if (!element) return "";
+  const flexCandidates = [element, ...element.querySelectorAll("span, div, a")]
+    .filter((node) => {
+      try {
+        const style = window.getComputedStyle(node);
+        return style.display.includes("flex");
+      } catch {
+        return false;
+      }
+    })
+    .slice(0, 12);
+
+  const texts = flexCandidates.map((root) => {
+    const children = [...root.children]
+      .map((child, index) => {
+        const text = (child.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text) return null;
+        const style = window.getComputedStyle(child);
+        const hidden = style.position === "absolute" || style.visibility === "hidden" || style.display === "none";
+        return {
+          text,
+          hidden,
+          index,
+          order: Number(style.order || 0)
+        };
+      })
+      .filter(Boolean)
+      .filter((item) => !item.hidden)
+      .sort((a, b) => a.order - b.order || a.index - b.index);
+    return children.map((child) => child.text).join("").replace(/\s+/g, " ").trim();
+  }).filter(Boolean);
+
+  return texts.sort((a, b) => b.length - a.length)[0] || "";
+}
+
 function isVisibleElement(element) {
   if (!element) return false;
   const rect = element.getBoundingClientRect();
@@ -413,6 +451,114 @@ function decodeFacebookEscapes(value = "") {
     .trim();
 }
 
+function styleValue(styles, name) {
+  return Array.isArray(styles) ? (styles.find((item) => item?.name === name)?.val || "") : "";
+}
+
+function isHiddenLabelChild(node) {
+  const styles = Array.isArray(node?.styles) ? node.styles : [];
+  return styleValue(styles, "position") === "absolute" || styleValue(styles, "top") === "3em";
+}
+
+function readVisibleLabelText(labelNode) {
+  const children = Array.isArray(labelNode?.children) ? labelNode.children : [];
+  const ordered = children
+    .map((child) => ({
+      order: Number(styleValue(child?.styles, "order") || Number.POSITIVE_INFINITY),
+      text: decodeFacebookEscapes(child?.text || ""),
+      hidden: isHiddenLabelChild(child)
+    }))
+    .filter((child) => child.text)
+    .filter((child) => !child.hidden)
+    .sort((a, b) => a.order - b.order);
+  const text = ordered.map((child) => child.text).join("").replace(/\s+/g, " ").trim();
+  return text || "";
+}
+
+function readVisibleLabelTextFromScriptText(text = "", anchorIndex = 0) {
+  const source = decodeFacebookEscapes(text);
+  const marker = "\"ghl_label\":{";
+  const candidates = [];
+  let searchIndex = 0;
+
+  while (searchIndex < source.length) {
+    const labelIndex = source.indexOf(marker, searchIndex);
+    if (labelIndex === -1) break;
+    const slice = source.slice(labelIndex, Math.min(source.length, labelIndex + 12000));
+    const childRegex = /"styles":\[(.*?)\],"text":"(.*?)","tag":"span","children":\[\]/g;
+    const visible = [];
+    for (let childMatch = childRegex.exec(slice); childMatch; childMatch = childRegex.exec(slice)) {
+      const styles = decodeFacebookEscapes(childMatch[1] || "");
+      const order = Number(styles.match(/"name":"order","val":"(\d+)"/)?.[1] || Number.POSITIVE_INFINITY);
+      const hidden = styles.includes("\"name\":\"position\",\"val\":\"absolute\"") || styles.includes("\"name\":\"top\",\"val\":\"3em\"");
+      const childText = decodeFacebookEscapes(childMatch[2] || "");
+      if (!hidden && childText) visible.push({ order, text: childText });
+      if (childMatch.index === childRegex.lastIndex) childRegex.lastIndex += 1;
+    }
+    const textValue = visible
+      .sort((a, b) => a.order - b.order)
+      .map((item) => item.text)
+      .join("")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (textValue) candidates.push({ text: textValue, distance: Math.abs(labelIndex - anchorIndex) });
+    searchIndex = labelIndex + marker.length;
+  }
+
+  candidates.sort((a, b) => {
+    const looksLikeTimeA = looksLikeTime(a.text) ? 1 : 0;
+    const looksLikeTimeB = looksLikeTime(b.text) ? 1 : 0;
+    return looksLikeTimeB - looksLikeTimeA || a.distance - b.distance;
+  });
+  return candidates[0]?.text || "";
+}
+
+function parseClockTime(text = "") {
+  const match = String(text || "").match(/(\d{1,2}):(\d{2})(?:\s*([AP]M))?/i);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const meridiem = (match[3] || "").toUpperCase();
+  if (meridiem === "PM" && hour < 12) hour += 12;
+  if (meridiem === "AM" && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+function normalizePhotoTimeText(displayTimeText = "", rawTimestamp = 0) {
+  const normalized = String(displayTimeText || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return rawTimestamp ? formatPhotoFallbackTime(rawTimestamp) : "";
+  if (isRelativeTimeText(normalized) && rawTimestamp) return formatPhotoFallbackTime(rawTimestamp);
+  const clock = parseClockTime(normalized);
+  if (clock && rawTimestamp) {
+    const date = new Date(rawTimestamp);
+    if (!Number.isNaN(date.getTime())) {
+      date.setHours(clock.hour, clock.minute, 0, 0);
+      return formatPhotoFallbackTime(date.getTime());
+    }
+  }
+  return normalized;
+}
+
+function extractServerTimeMsFromText(text = "") {
+  const match = String(text || "").match(/"ServerTimeData",\[\],\{"serverTime":(\d{13})/);
+  if (!match?.[1]) return 0;
+  const timestampMs = Number(match[1]);
+  return Number.isFinite(timestampMs) ? timestampMs : 0;
+}
+
+function getPageReferenceTimeMs() {
+  if (cachedPageReferenceTimeMs && Number.isFinite(cachedPageReferenceTimeMs)) return cachedPageReferenceTimeMs;
+  for (const script of document.querySelectorAll("script[type='application/json'], script")) {
+    const timestampMs = extractServerTimeMsFromText(script.textContent || "");
+    if (timestampMs) {
+      cachedPageReferenceTimeMs = timestampMs;
+      return timestampMs;
+    }
+  }
+  cachedPageReferenceTimeMs = Date.now();
+  return cachedPageReferenceTimeMs;
+}
+
 function nearestRegexMatch(text, pattern, anchorIndex) {
   const source = String(text || "");
   const regex = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
@@ -483,6 +629,7 @@ function findPhotoStoryFromRawScriptText(text, identifiers) {
     const matchedPostUrl = urlMatches.find((url) => !postId || extractPostIdFromUrl(url) === postId) || urlMatches[0] || "";
     const matchedPostId = postId || extractPostIdFromUrl(matchedPostUrl);
     const rawTimestamp = publishMatch?.[1] ? Number(publishMatch[1]) * 1000 : creationMatch?.[1] ? Number(creationMatch[1]) * 1000 : 0;
+    const visibleLabelText = readVisibleLabelTextFromScriptText(segment, anchorIndex);
 
     if (!rawTimestamp) return null;
     return {
@@ -491,7 +638,8 @@ function findPhotoStoryFromRawScriptText(text, identifiers) {
       rawTimestamp,
       timestampKind: publishMatch?.[1] ? "publish_time" : "creation_time",
       postText: decodeFacebookEscapes(messageMatch?.[1] || ""),
-      matchedPostId
+      matchedPostId,
+      displayTimeText: visibleLabelText
     };
   }).filter(Boolean);
 
@@ -514,13 +662,15 @@ function walkForPhotoStoryFallback(node, result = []) {
   const actorUrl = node?.story?.actors?.[0]?.url || node?.story?.actors?.[0]?.profile_url;
   const storyUrl = node?.story?.url;
   const creationTime = node?.story?.creation_time;
+  const visibleTimeText = readVisibleLabelText(node?.story?.ghl_label);
   if (actorName && storyUrl && creationTime) {
     result.push({
       authorName: actorName,
       authorUrl: normalizeUrl(actorUrl || ""),
       postUrl: normalizeUrl(storyUrl),
       rawTimestamp: Number(creationTime) * 1000,
-      timestampKind: "creation_time"
+      timestampKind: "creation_time",
+      displayTimeText: visibleTimeText
     });
   }
 
@@ -537,7 +687,8 @@ function walkForPhotoStoryFallback(node, result = []) {
       postUrl: normalizeUrl(shareable.url),
       rawTimestamp: Number(publishTime) * 1000,
       timestampKind: "publish_time",
-      postText: typeof messageText === "string" ? messageText : ""
+      postText: typeof messageText === "string" ? messageText : "",
+      displayTimeText: visibleTimeText
     });
   }
 
@@ -552,6 +703,52 @@ function formatPhotoFallbackTime(timestampMs) {
   const date = new Date(timestampMs);
   if (Number.isNaN(date.getTime())) return "";
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()} ${String(date.getHours()).padStart(2, "0")}.${String(date.getMinutes()).padStart(2, "0")}.${String(date.getSeconds()).padStart(2, "0")}`;
+}
+
+function findStoryScriptFallback(postUrl = "") {
+  const normalizedPostUrl = normalizeUrl(postUrl || "");
+  const postId = extractPostIdFromUrl(normalizedPostUrl) || extractPostIdFromUrl(window.location.href);
+  const cacheKey = postId || normalizedPostUrl || normalizeUrl(window.location.href);
+  if (storyFallbackCache.has(cacheKey)) return storyFallbackCache.get(cacheKey);
+
+  const candidates = [];
+  for (const script of document.querySelectorAll("script[type='application/json'], script")) {
+    const text = script.textContent || "";
+    if (!text) continue;
+    const hasTargetPost = Boolean(postId && text.includes(postId));
+    const hasTimeMarkers = text.includes("publish_time") || text.includes("creation_time");
+    if (!hasTargetPost && !hasTimeMarkers) continue;
+
+    const textFallback = findPhotoStoryFromRawScriptText(text, { photoId: "", postId, mediaSetToken: "" });
+    if (textFallback) candidates.push(textFallback);
+
+    const parsed = parseJsonScriptText(text);
+    if (!parsed) continue;
+    walkForPhotoStoryFallback(parsed, candidates);
+  }
+
+  const filtered = candidates.filter((item) => {
+    if (!item?.authorName || !item?.postUrl || !item?.rawTimestamp) return false;
+    if (!postId) return true;
+    return extractPostIdFromUrl(item.postUrl) === postId;
+  });
+
+  const ranked = filtered
+    .map((item) => {
+      const itemPostId = extractPostIdFromUrl(item.postUrl);
+      let score = 0;
+      if (item.timestampKind === "publish_time") score += 100;
+      if (postId && itemPostId === postId) score += 80;
+      if (normalizedPostUrl && item.postUrl === normalizedPostUrl) score += 40;
+      if (item.postUrl.includes("/permalink/")) score += 10;
+      if (item.displayTimeText && !isRelativeTimeText(item.displayTimeText)) score += 6;
+      return { ...item, score };
+    })
+    .sort((a, b) => b.score - a.score || b.rawTimestamp - a.rawTimestamp);
+
+  const result = ranked[0] || null;
+  storyFallbackCache.set(cacheKey, result);
+  return result;
 }
 
 function findPhotoStoryFallback() {
@@ -574,10 +771,20 @@ function findPhotoStoryFallback() {
     walkForPhotoStoryFallback(parsed, candidates);
   }
   const filtered = candidates.filter((item) => item?.authorName && item?.postUrl && item?.rawTimestamp);
+  const merged = filtered.map((item) => {
+    if (item.displayTimeText) return item;
+    const itemPostId = item.matchedPostId || extractPostIdFromUrl(item.postUrl);
+    const related = filtered.find((candidate) => {
+      if (!candidate.displayTimeText) return false;
+      const candidatePostId = candidate.matchedPostId || extractPostIdFromUrl(candidate.postUrl);
+      return candidatePostId && itemPostId && candidatePostId === itemPostId;
+    });
+    return related ? { ...item, displayTimeText: related.displayTimeText } : item;
+  });
   const exactPostMatches = postId
-    ? filtered.filter((item) => extractPostIdFromUrl(item.postUrl) === postId)
+    ? merged.filter((item) => extractPostIdFromUrl(item.postUrl) === postId)
     : [];
-  const scoped = exactPostMatches.length > 0 ? exactPostMatches : filtered;
+  const scoped = exactPostMatches.length > 0 ? exactPostMatches : merged;
   const ranked = scoped
     .map((item) => {
       const itemPostId = extractPostIdFromUrl(item.postUrl);
@@ -586,6 +793,7 @@ function findPhotoStoryFallback() {
       if (postId && itemPostId === postId) score += 80;
       if (item.postUrl.includes("/permalink/")) score += 12;
       if (photoId && item.postUrl.includes(photoId)) score += 8;
+      if (item.displayTimeText && looksLikeTime(item.displayTimeText)) score += 6;
       return { ...item, score };
     })
     .sort((a, b) => b.score - a.score || b.rawTimestamp - a.rawTimestamp);
@@ -708,6 +916,12 @@ function extractTimeFragment(value) {
   return Number.isNaN(new Date(normalized).getTime()) ? "" : text;
 }
 
+function isRelativeTimeText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  return /^(?:just now|now|today|yesterday|about an hour ago|\d+\s*(?:[mM]|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))$/i.test(text);
+}
+
 function looksLikeTime(value) {
   return Boolean(extractTimeFragment(value));
 }
@@ -755,11 +969,13 @@ function findRawTime(container) {
   const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
+      const orderedText = isFacebookPhotoPage() ? orderedVisibleText(element) : "";
       const value = [
         element.getAttribute("aria-label"),
         element.getAttribute("title"),
         element.getAttribute("datetime"),
         element.getAttribute("data-utime"),
+        orderedText,
         visibleText(element)
       ].map((candidate) => extractTimeFragment(candidate)).find(Boolean);
       let score = 0;
@@ -773,6 +989,7 @@ function findRawTime(container) {
       if (isPhotoShellHref(anchorHref)) score += isFacebookPhotoPage() ? -3 : 2;
       if (element.tagName.toLowerCase() === "a") score += 1;
       if (hasVisibleText) score += 2;
+      if (orderedText && orderedText !== visibleText(element)) score += 4;
       if (element.getAttribute("data-utime") && isFacebookPhotoPage() && !hasVisibleText) score -= 2;
       return { element, value: value || "", score };
     })
@@ -874,15 +1091,20 @@ function extractPostText(container, authorName, rawTimeText) {
 
 function extractPost(container) {
   const contextContainer = findPhotoPostContext(container);
-  const photoFallback = findPhotoStoryFallback();
   const domPostUrl = findPostUrl(contextContainer);
+  const photoFallback = findPhotoStoryFallback();
+  const scriptFallback = photoFallback || findStoryScriptFallback(domPostUrl);
+  const pageReferenceTimeMs = getPageReferenceTimeMs();
   const domRawTimeText = findRawTime(contextContainer);
-  const postUrl = photoFallback?.postUrl || domPostUrl;
-  const rawTimeText = photoFallback?.rawTimestamp ? formatPhotoFallbackTime(photoFallback.rawTimestamp) : domRawTimeText;
+  const postUrl = scriptFallback?.postUrl || domPostUrl;
+  const fallbackRawTimeText = scriptFallback ? normalizePhotoTimeText(scriptFallback.displayTimeText, scriptFallback.rawTimestamp) : "";
+  const rawTimeText = scriptFallback && (!domRawTimeText || isRelativeTimeText(domRawTimeText))
+    ? (fallbackRawTimeText || domRawTimeText)
+    : domRawTimeText;
   const groupName = findSourceName(contextContainer);
   const groupUrl = findSourceUrl(contextContainer, postUrl);
-  const authorName = photoFallback?.authorName || findAuthor(contextContainer, rawTimeText, groupName);
-  const postText = extractPostText(contextContainer, authorName, rawTimeText) || photoFallback?.postText || "未识别到正文";
+  const authorName = scriptFallback?.authorName || findAuthor(contextContainer, rawTimeText, groupName);
+  const postText = extractPostText(contextContainer, authorName, rawTimeText) || scriptFallback?.postText || "未识别到正文";
   const postId = hash([postUrl, postText.slice(0, 120), groupName, rawTimeText].join("|"));
   return {
     postId,
@@ -894,6 +1116,7 @@ function extractPost(container) {
     postUrl,
     rawTimeText,
     collectedAt: new Date().toISOString(),
+    timeReferenceAt: new Date(pageReferenceTimeMs || Date.now()).toISOString(),
     sourceWindowId: `tab-${Date.now()}`,
     sourceAccountNote: "",
     statusNote: rawTimeText ? "正常" : "时间未识别，需要人工确认"

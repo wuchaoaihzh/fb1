@@ -543,7 +543,7 @@ function normalizeDateTimeInput(value?: string): string {
 
 function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost {
   const rawTimeText = input.rawTimeText || "";
-  const parsedTime = parseFacebookTime(rawTimeText);
+  const parsedTime = parseFacebookTime(rawTimeText, input.timeReferenceAt ? new Date(input.timeReferenceAt) : new Date());
   const scored = scorePost(
     {
       postText: input.postText,
@@ -574,6 +574,7 @@ function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost 
     scoreReasons: scored.scoreReasons,
     alertTriggered: input.alertTriggered || false,
     collectedAt: normalizeDateTimeInput(input.collectedAt),
+    timeReferenceAt: input.timeReferenceAt ? normalizeDateTimeInput(input.timeReferenceAt) : undefined,
     sourceWindowId: input.sourceWindowId || clientId,
     sourceAccountNote: input.sourceAccountNote || "",
     statusNote,

@@ -29,6 +29,7 @@ export interface RadarPost {
   scoreReasons: string[];
   alertTriggered: boolean;
   collectedAt: string;
+  timeReferenceAt?: string;
   sourceWindowId: string;
   sourceAccountNote: string;
   statusNote: string;

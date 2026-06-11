@@ -9,6 +9,7 @@ export interface ParsedTimeResult {
 
 const minutePatterns = [
   /^(\d+)\s*m(?:in|ins|inute|inutes)?$/i,
+  /^(\d+)\s*[mM]$/i,
   /^(\d+)\s*minutes?$/i,
   /^(\d+)\s*mins?$/i,
   /^(\d+)\s*分(?:钟)?(?:前)?$/i
