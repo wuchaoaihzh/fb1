@@ -306,6 +306,7 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
   }
   collectionState = message.pluginState || message.currentState || "error";
   if (message.commandType === "start_auto_scroll" || message.commandType === "scroll_once") {
+    if (message.success) collectionState = "collecting";
     scrollState = message.success ? (message.details?.currentStep && message.details.currentStep >= (message.details.totalSteps || 1) ? "stopped_with_data" : "scrolling") : "error";
     if (message.details) {
       scrollProgress = {
@@ -316,6 +317,7 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
       };
     }
   } else if (message.commandType === "stop_auto_scroll") {
+    if (collectionState === "auto_scrolling") collectionState = "collecting";
     scrollState = "stopped";
   }
   const detailText = message.details ? `；详情：${JSON.stringify(message.details)}` : "";
@@ -517,6 +519,17 @@ async function exportXlsx(): Promise<string> {
 
 function startLocalServer(): void {
   const api = express();
+  api.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type");
+    res.header("Access-Control-Allow-Private-Network", "true");
+    if (req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
   api.use(express.json({ limit: "5mb" }));
   api.get("/health", (_req, res) => res.json({ ok: true, connectedClients: stats().connectedClients }));
   api.get("/state", (_req, res) => res.json(appState().payload));

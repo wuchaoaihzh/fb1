@@ -8,12 +8,15 @@ import "./styles.css";
 type KeywordCategory = KeywordItem["category"];
 type OperationLog = { at: string; message: string; level: "info" | "success" | "warning" | "error" };
 type SortMode = "recommended" | "score" | "postTime" | "collectedAt" | "alerted" | "unhandled" | "unknown";
+type ScrollState = "stopped" | "starting" | "scrolling" | "stopped_with_data" | "error";
 
 interface AppState {
   posts: RadarPost[];
   settings: RadarSettings;
   collectionState: CollectionState;
   appVersion?: string;
+  scrollState?: ScrollState;
+  scrollProgress?: { currentStep: number; totalSteps: number; delayMs?: number; collectedCount?: number };
   operationLog: OperationLog[];
   stats: RadarStats;
   clients: ExtensionClientInfo[];
@@ -75,8 +78,16 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
   return <div className="stat-card"><span>{label}</span><strong>{value}</strong></div>;
 }
 
+function scrollStateLabel(value?: ScrollState): string {
+  if (value === "starting") return "正在启动";
+  if (value === "scrolling") return "自动滚动中";
+  if (value === "stopped_with_data") return "已停止";
+  if (value === "error") return "错误";
+  return "已停止";
+}
+
 function App() {
-  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.14", operationLog: [], stats: emptyStats, clients: [] });
+  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", scrollState: "stopped", scrollProgress: { currentStep: 0, totalSteps: 0, delayMs: 0, collectedCount: 0 }, appVersion: "0.1.14", operationLog: [], stats: emptyStats, clients: [] });
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
@@ -106,7 +117,13 @@ function App() {
         const message = JSON.parse(event.data);
         if (message.type === "state") {
           const settings = { ...defaultSettings, ...message.payload.settings, groupMonitor: { ...defaultSettings.groupMonitor, ...message.payload.settings?.groupMonitor } };
-          setState((previous) => ({ ...previous, ...message.payload, settings }));
+          setState((previous) => ({
+            ...previous,
+            ...message.payload,
+            settings,
+            scrollState: message.payload.scrollState || previous.scrollState || "stopped",
+            scrollProgress: message.payload.scrollProgress || previous.scrollProgress || { currentStep: 0, totalSteps: 0, delayMs: 0, collectedCount: 0 }
+          }));
           setDraftSettings(settings);
         }
       });
@@ -321,6 +338,7 @@ function App() {
       </header>
 
       <section className="status-grid">
+        <div className={`panel compact state-${state.scrollState === "stopped_with_data" ? "collecting" : state.scrollState || "stopped"}`}><h2>滚动状态</h2><strong>{scrollStateLabel(state.scrollState)}</strong><span>{state.scrollProgress?.totalSteps ? `进度 ${state.scrollProgress.currentStep || 0} / ${state.scrollProgress.totalSteps}；本轮采集 ${state.scrollProgress.collectedCount || 0} 条` : "等待滚动命令"}</span></div>
         <div className="panel compact"><h2>插件连接</h2><strong>{state.stats.connectedClients > 0 ? "插件已连接" : "插件未连接"}</strong><span>{connectionHint}</span></div>
         <div className={`panel compact state-${state.collectionState}`}><h2>采集状态</h2><strong>{stateLabels[state.collectionState]}</strong><span>{state.collectionState === "error" ? "采集状态未知，请刷新 Facebook 页面或重新打开插件" : "状态由插件 ACK 确认"}</span></div>
         <StatCard label="已采集帖子" value={state.stats.totalPosts} />
