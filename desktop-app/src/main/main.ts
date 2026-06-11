@@ -16,6 +16,7 @@ import {
   type BridgeMessage,
   type CollectionState,
   type ExtensionClientInfo,
+  type GroupMonitorItem,
   type RadarPost,
   type RadarSettings,
   type RadarStats
@@ -55,6 +56,12 @@ const pendingCommands = new Map<string, {
 const handledAckKeys = new Set<string>();
 const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
+type GroupStatusSnapshot = Pick<GroupMonitorItem, "status" | "lastCheckedAt" | "lastNewPostAt" | "todayNewPosts"> & {
+  dateKey: string;
+  name?: string;
+  url?: string;
+};
+const groupStatusByKey = new Map<string, GroupStatusSnapshot>();
 
 function operationLogFile(): string {
   return path.join(logDir(), "operation.log");
@@ -208,6 +215,19 @@ function isFacebookGroupUrl(url?: string): boolean {
   }
 }
 
+function isFacebookHomeUrl(url?: string): boolean {
+  try {
+    const parsed = new URL(String(url || ""));
+    return /(^|\.)facebook\.com$/i.test(parsed.hostname) && (parsed.pathname === "/" || parsed.pathname === "/home.php");
+  } catch {
+    return false;
+  }
+}
+
+function isCollectibleFacebookUrl(url?: string): boolean {
+  return isFacebookHomeUrl(url) || isFacebookGroupUrl(url);
+}
+
 function activeHttpClients(excludedClientIds = new Set<string>()): ExtensionClientInfo[] {
   const now = Date.now();
   const active: ExtensionClientInfo[] = [];
@@ -231,7 +251,7 @@ function activeCommandClients(): ExtensionClientInfo[] {
   const active: ExtensionClientInfo[] = [];
   httpClients.forEach((client) => {
     if (now - client.lastSeenAt > 10000) return;
-    if (!isFacebookGroupUrl(client.tabUrl)) return;
+    if (!isCollectibleFacebookUrl(client.tabUrl)) return;
     if (client.clientId.startsWith("content-")) {
       active.unshift({
         clientId: client.clientId,
@@ -252,12 +272,76 @@ function activeCommandClients(): ExtensionClientInfo[] {
   return contentClients.length > 0 ? contentClients : active;
 }
 
+function todayKey(now = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+function groupMonitorKey(url?: string): string {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) return "";
+    if (/^\/groups\/feed\/?$/i.test(parsed.pathname)) return "/groups/feed/";
+    const match = parsed.pathname.match(/\/groups\/([^/?#]+)/i);
+    if (match) return `/groups/${match[1].toLowerCase()}`;
+    return parsed.pathname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function upsertGroupStatus(url: string | undefined, patch: Partial<GroupStatusSnapshot>): void {
+  const key = groupMonitorKey(url);
+  if (!key) return;
+  const current = groupStatusByKey.get(key);
+  groupStatusByKey.set(key, {
+    status: patch.status || current?.status || "not_open",
+    lastCheckedAt: patch.lastCheckedAt ?? current?.lastCheckedAt,
+    lastNewPostAt: patch.lastNewPostAt ?? current?.lastNewPostAt,
+    todayNewPosts: patch.todayNewPosts ?? current?.todayNewPosts ?? 0,
+    dateKey: patch.dateKey || current?.dateKey || todayKey(),
+    name: patch.name ?? current?.name,
+    url: patch.url ?? current?.url ?? url
+  });
+}
+
+function collectibleClients(): ExtensionClientInfo[] {
+  return [...clients.values(), ...activeHttpClients(new Set([...clients.values()].map((client) => client.clientId)))]
+    .filter((client) => isCollectibleFacebookUrl(client.tabUrl));
+}
+
+function resolveGroupMonitorGroups(groups: GroupMonitorItem[]): GroupMonitorItem[] {
+  const openKeys = new Set(collectibleClients().map((client) => groupMonitorKey(client.tabUrl)).filter(Boolean));
+  return groups.map((group) => {
+    const key = groupMonitorKey(group.url);
+    const snapshot = key ? groupStatusByKey.get(key) : undefined;
+    const isOpen = key ? openKeys.has(key) : false;
+    const resolvedStatus = snapshot?.status === "monitoring" && !isOpen ? "not_open" : (snapshot?.status || (isOpen ? "open" : "not_open"));
+    return {
+      ...group,
+      status: resolvedStatus,
+      lastCheckedAt: snapshot?.lastCheckedAt || group.lastCheckedAt,
+      lastNewPostAt: snapshot?.lastNewPostAt || group.lastNewPostAt,
+      todayNewPosts: snapshot?.todayNewPosts ?? group.todayNewPosts
+    };
+  });
+}
+
+function stateSettings(): RadarSettings {
+  return {
+    ...settings,
+    groupMonitor: {
+      ...settings.groupMonitor,
+      groups: resolveGroupMonitorGroups(settings.groupMonitor.groups)
+    }
+  };
+}
+
 function appState() {
   return {
     type: "state",
     payload: {
       posts: [...posts.values()].sort((a, b) => b.collectedAt.localeCompare(a.collectedAt)),
-      settings,
+      settings: stateSettings(),
       collectionState,
       scrollState,
       scrollProgress,
@@ -319,6 +403,33 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
   } else if (message.commandType === "stop_auto_scroll") {
     if (collectionState === "auto_scrolling") collectionState = "collecting";
     scrollState = "stopped";
+  }
+  if (message.url && isFacebookGroupUrl(message.url)) {
+    upsertGroupStatus(message.url, { status: message.success ? "open" : "error", url: message.url });
+  }
+  if ((message.commandType === "start_group_monitor" || message.commandType === "start_monitoring") && message.success) {
+    const details = message.details || {};
+    const targetUrl = String(details.groupUrl || message.url || "");
+    const currentDateKey = todayKey();
+    const current = groupStatusByKey.get(groupMonitorKey(targetUrl));
+    const collectedCount = Number(details.collectedCount || 0);
+    const todayNewPosts = current && current.dateKey === currentDateKey ? (current.todayNewPosts + collectedCount) : collectedCount;
+    upsertGroupStatus(targetUrl, {
+      status: "monitoring",
+      lastCheckedAt: formatLocalDateTime(new Date()),
+      lastNewPostAt: collectedCount > 0 ? formatLocalDateTime(new Date()) : current?.lastNewPostAt,
+      todayNewPosts,
+      dateKey: currentDateKey,
+      name: typeof details.groupName === "string" ? details.groupName : undefined,
+      url: targetUrl || undefined
+    });
+  }
+  if ((message.commandType === "stop_group_monitor" || message.commandType === "stop_monitoring") && message.success) {
+    const targetUrl = String(message.details?.groupUrl || message.url || "");
+    upsertGroupStatus(targetUrl, {
+      status: isFacebookGroupUrl(targetUrl) ? "open" : "not_open",
+      lastCheckedAt: formatLocalDateTime(new Date())
+    });
   }
   const detailText = message.details ? `；详情：${JSON.stringify(message.details)}` : "";
   const locationText = message.url ? `；页面：${message.url}` : "";
@@ -483,10 +594,13 @@ function exportRows() {
     评分: post.score,
     是否已提醒: post.alertTriggered ? "是" : "否",
     是否已处理: post.handled ? "是" : "否",
+    处理时间: post.handledAt || "",
+    处理颜色: post.handledColor || "",
     是否已忽略: post.ignored ? "是" : "否",
     采集时间: post.collectedAt,
     来源窗口: post.sourceWindowId,
-    状态备注: post.statusNote
+    状态备注: post.statusNote,
+    用户备注: post.remark || ""
   }));
 }
 
@@ -544,6 +658,9 @@ function startLocalServer(): void {
       userAgent: body.userAgent,
       lastSeenAt: Date.now()
     });
+    if (isFacebookGroupUrl(body.tabUrl)) {
+      upsertGroupStatus(body.tabUrl, { status: "open", url: body.tabUrl });
+    }
     const commands = commandQueues.get(clientId) || [];
     commandQueues.set(clientId, []);
     broadcastState();
@@ -648,14 +765,22 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     broadcastState();
     return { ok: true, success: true, clearedCount: count, message: `已清空当前数据，共清除 ${count} 条帖子` };
   }
-  if (command === "mark-handled" && typeof payload === "string") {
-    const post = [...posts.values()].find((item) => item.postId === payload);
+  if (command === "mark-handled" && (typeof payload === "string" || typeof payload === "object")) {
+    const request = typeof payload === "string" ? { postId: payload } : (payload as { postId?: string; handledColor?: string; remark?: string });
+    const post = [...posts.values()].find((item) => item.postId === request.postId);
     if (post) {
-      posts.set(dedupeKey(post), { ...post, handled: true, statusNote: "已处理" });
+      posts.set(dedupeKey(post), {
+        ...post,
+        handled: true,
+        handledAt: formatLocalDateTime(new Date()),
+        handledColor: request.handledColor || post.handledColor || "#d9f2e6",
+        remark: typeof request.remark === "string" ? request.remark : post.remark,
+        statusNote: "已处理"
+      });
       persistPosts();
       addOperation(`帖子已标记处理：${post.postUrl || post.postId}`, "success");
     } else {
-      addOperation(`标记已处理失败：未找到帖子 ${payload}`, "error");
+      addOperation(`标记已处理失败：未找到帖子 ${request.postId || ""}`, "error");
     }
   }
   if (command === "ignore-post" && typeof payload === "string") {
@@ -683,10 +808,10 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     addOperation("窗口闪动和系统通知测试已触发", "success");
   }
   if (command === "open-data-dir") {
-    const result = await shell.openPath(dataDir());
+    const result = await shell.openPath(exportDir());
     if (result) addOperation(`打开数据目录失败：${result}`, "error");
-    else addOperation(`已打开数据目录：${dataDir()}`, "success");
-    return { ok: !result, path: dataDir(), message: result || "已打开数据目录" };
+    else addOperation(`已打开导出目录：${exportDir()}`, "success");
+    return { ok: !result, path: exportDir(), message: result || "已打开导出目录" };
   }
   if (command === "open-log-folder") {
     const result = await shell.openPath(logDir());

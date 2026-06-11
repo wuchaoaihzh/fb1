@@ -32,8 +32,26 @@ function isFacebookGroupUrl(url) {
   }
 }
 
+function isFacebookHomeUrl(url) {
+  try {
+    const parsed = new URL(url || "");
+    return /(^|\.)facebook\.com$/i.test(parsed.hostname) && (parsed.pathname === "/" || parsed.pathname === "/home.php");
+  } catch {
+    return false;
+  }
+}
+
+function isCollectibleFacebookUrl(url) {
+  return isFacebookHomeUrl(url) || isFacebookGroupUrl(url);
+}
+
 async function listFacebookTabs() {
   return chrome.tabs.query(facebookTabQuery());
+}
+
+async function listCollectibleFacebookTabs() {
+  const tabs = await listFacebookTabs();
+  return tabs.filter((tab) => tab.id && isCollectibleFacebookUrl(tab.url || ""));
 }
 
 async function listGroupFacebookTabs() {
@@ -42,14 +60,15 @@ async function listGroupFacebookTabs() {
 }
 
 async function getActiveFacebookTab(options = {}) {
-  const { groupOnly = false } = options;
+  const { collectionOnly = false, groupOnly = false } = options;
+  const matches = (tab) => tab?.id && isFacebookUrl(tab.url || "") && (!collectionOnly || isCollectibleFacebookUrl(tab.url || "")) && (!groupOnly || isFacebookGroupUrl(tab.url || ""));
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const activeTab = tabs[0];
-  if (activeTab?.id && isFacebookUrl(activeTab.url || "") && (!groupOnly || isFacebookGroupUrl(activeTab.url || ""))) return activeTab;
+  if (matches(activeTab)) return activeTab;
   const activeTabs = await chrome.tabs.query({ active: true });
-  const activeFacebookTab = activeTabs.find((tab) => tab.id && isFacebookUrl(tab.url || "") && (!groupOnly || isFacebookGroupUrl(tab.url || "")));
+  const activeFacebookTab = activeTabs.find((tab) => matches(tab));
   if (activeFacebookTab) return activeFacebookTab;
-  const facebookTabs = groupOnly ? await listGroupFacebookTabs() : await listFacebookTabs();
+  const facebookTabs = groupOnly ? await listGroupFacebookTabs() : (collectionOnly ? await listCollectibleFacebookTabs() : await listFacebookTabs());
   return facebookTabs.find((tab) => tab.id);
 }
 
@@ -66,8 +85,8 @@ async function ensureContentScript(tabId) {
 }
 
 async function sendToFacebookTab(message, options = {}) {
-  const { groupOnly = false } = options;
-  const tab = await getActiveFacebookTab({ groupOnly });
+  const { collectionOnly = false, groupOnly = false } = options;
+  const tab = await getActiveFacebookTab({ collectionOnly, groupOnly });
   if (!tab?.id) {
     return { ok: false, error: "当前没有可采集的 Facebook 页面，请先在 AdsPower/Chrome 中打开 Facebook 页面" };
   }
@@ -127,8 +146,8 @@ async function debuggerMouseWheel(tabId, distance = Math.floor(600 + Math.random
 }
 
 async function sendToAllFacebookTabs(message, options = {}) {
-  const { groupOnly = false } = options;
-  const tabs = groupOnly ? await listGroupFacebookTabs() : await listFacebookTabs();
+  const { collectionOnly = false } = options;
+  const tabs = collectionOnly ? await listCollectibleFacebookTabs() : await listFacebookTabs();
   if (tabs.length === 0) {
     return { ok: false, error: "未检测到任何已打开的 Facebook 页面" };
   }
@@ -196,7 +215,7 @@ async function postAck(ack) {
 
 async function heartbeatToLocal() {
   try {
-    const tab = await getActiveFacebookTab({ groupOnly: true }) || await getActiveFacebookTab();
+    const tab = await getActiveFacebookTab({ collectionOnly: true }) || await getActiveFacebookTab();
     const response = await fetch(LOCAL_HEARTBEAT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -265,31 +284,34 @@ async function runExtensionCommand(message) {
       };
       nextState = extensionState;
     } else if (commandType === "collect_once") {
-      result = await sendToAllFacebookTabs({ ...message, type: "collect_now" }, { groupOnly: true });
+      result = await sendToAllFacebookTabs({ ...message, type: "collect_now" }, { collectionOnly: true });
       nextState = result.ok === false ? "error" : "collecting";
     } else if (commandType === "scroll_once") {
-      result = await sendToAllFacebookTabs({ ...message, type: "test_scroll_once" }, { groupOnly: true });
+      result = await sendToAllFacebookTabs({ ...message, type: "test_scroll_once" }, { collectionOnly: true });
       nextState = result.ok === false ? "error" : extensionState === "stopped" ? "collecting" : extensionState;
     } else if (commandType === "clear_posts") {
-      result = await sendToAllFacebookTabs(message, { groupOnly: true });
+      result = await sendToAllFacebookTabs(message, { collectionOnly: true });
       nextState = result.ok === false ? "error" : extensionState;
     } else if (commandType === "start_collecting") {
-      result = await sendToAllFacebookTabs(message, { groupOnly: true });
+      result = await sendToAllFacebookTabs(message, { collectionOnly: true });
       nextState = result.ok === false ? "error" : "collecting";
     } else if (commandType === "pause_collecting") {
-      result = await sendToAllFacebookTabs(message, { groupOnly: true });
+      result = await sendToAllFacebookTabs(message, { collectionOnly: true });
       nextState = result.ok === false ? "error" : "paused";
     } else if (commandType === "stop_collecting") {
-      result = await sendToAllFacebookTabs(message, { groupOnly: true });
+      result = await sendToAllFacebookTabs(message, { collectionOnly: true });
       nextState = result.ok === false ? "error" : "stopped";
     } else if (commandType === "start_auto_scroll") {
-      result = await sendToAllFacebookTabs(message, { groupOnly: true });
+      result = await sendToAllFacebookTabs(message, { collectionOnly: true });
       nextState = result.ok === false ? "error" : "auto_scrolling";
     } else if (commandType === "stop_auto_scroll") {
-      result = await sendToAllFacebookTabs(message, { groupOnly: true });
+      result = await sendToAllFacebookTabs(message, { collectionOnly: true });
       nextState = result.ok === false ? "error" : "collecting";
-    } else if (commandType === "diagnose" || commandType === "start_group_monitor" || commandType === "stop_group_monitor" || commandType === "start_monitoring" || commandType === "stop_monitoring") {
-      result = await sendToFacebookTab(message, { groupOnly: true });
+    } else if (commandType === "diagnose") {
+      result = await sendToFacebookTab(message, { collectionOnly: true });
+      if (result.ok === false) nextState = "error";
+    } else if (commandType === "start_group_monitor" || commandType === "stop_group_monitor" || commandType === "start_monitoring" || commandType === "stop_monitoring") {
+      result = await sendToFacebookTab(message, { collectionOnly: true, groupOnly: true });
       if ((commandType === "start_group_monitor" || commandType === "start_monitoring") && result.ok !== false) nextState = "monitoring";
       if ((commandType === "stop_group_monitor" || commandType === "stop_monitoring") && result.ok !== false) nextState = "stopped";
       if (result.ok === false) nextState = "error";

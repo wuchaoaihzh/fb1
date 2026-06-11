@@ -97,6 +97,8 @@ export const defaultSettings: RadarSettings = {
   groupMonitor: {
     enabled: false,
     defaultIntervalSeconds: 60,
+    autoRefreshEnabled: false,
+    autoRefreshSeconds: 120,
     groups: []
   },
   translation: {

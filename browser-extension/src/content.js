@@ -2,6 +2,7 @@ const LOCAL_HEARTBEAT = "http://127.0.0.1:8765/client-heartbeat";
 const LOCAL_POSTS = "http://127.0.0.1:8765/posts";
 const LOCAL_ACK = "http://127.0.0.1:8765/command-ack";
 const contentClientId = `content-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+const monitorSessionKey = "__foradar_group_monitor__";
 
 if (globalThis.__FORADAR_CONTENT_STOP__) {
   try {
@@ -13,12 +14,14 @@ if (globalThis.__FORADAR_CONTENT_STOP__) {
 
 let collecting = false;
 let autoScrollStopped = false;
-let monitorTimer = null;
-let latestSettings = null;
 let collectTimer = null;
-let contextActive = true;
+let monitorTimer = null;
 let feedObserver = null;
 let desktopPollTimer = null;
+let observerCollectTimer = null;
+let monitorReloadTimer = null;
+let latestSettings = null;
+let contextActive = true;
 const seenKeys = new Set();
 
 function stopAllLocalWork() {
@@ -28,10 +31,15 @@ function stopAllLocalWork() {
   if (collectTimer) clearInterval(collectTimer);
   if (monitorTimer) clearInterval(monitorTimer);
   if (desktopPollTimer) clearInterval(desktopPollTimer);
+  if (observerCollectTimer) clearTimeout(observerCollectTimer);
+  if (monitorReloadTimer) clearTimeout(monitorReloadTimer);
+  if (feedObserver) feedObserver.disconnect();
   collectTimer = null;
   monitorTimer = null;
   desktopPollTimer = null;
-  if (feedObserver) feedObserver.disconnect();
+  observerCollectTimer = null;
+  monitorReloadTimer = null;
+  feedObserver = null;
 }
 
 globalThis.__FORADAR_CONTENT_STOP__ = stopAllLocalWork;
@@ -173,6 +181,36 @@ function normalizeUrl(url) {
   }
 }
 
+function readMonitorSession() {
+  try {
+    const raw = window.sessionStorage.getItem(monitorSessionKey);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveMonitorSession(intervalSeconds) {
+  try {
+    const previous = readMonitorSession() || {};
+    window.sessionStorage.setItem(monitorSessionKey, JSON.stringify({
+      ...previous,
+      active: true,
+      intervalSeconds: Math.max(30, Number(intervalSeconds) || 60)
+    }));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function clearMonitorSession() {
+  try {
+    window.sessionStorage.removeItem(monitorSessionKey);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 function visibleText(element) {
   return (element?.innerText || element?.textContent || "").replace(/\s+/g, " ").trim();
 }
@@ -192,27 +230,23 @@ function isVisibleElement(element) {
 }
 
 function isNoiseLine(line) {
-  const text = line.trim();
+  const text = String(line || "").trim();
   const lower = text.toLowerCase();
   if (!text) return true;
   if (noiseTexts.has(lower)) return true;
   if (/^(like|comment|share|send|\d+\s+comments?|\d+\s+shares?)$/i.test(text)) return true;
   if (/^(home|watch|marketplace|groups|gaming|notifications|messenger)$/i.test(text)) return true;
-  if (/^(\d+[smhdw]|just now|yesterday)$/i.test(text)) return true;
   if (text.length <= 2) return true;
   return false;
 }
 
-function findGroupName() {
-  const heading = document.querySelector("h1");
-  const title = visibleText(heading);
-  if (title) return title;
-  return document.title.replace(/\| Facebook$/i, "").trim() || "未知群组";
-}
-
-function findGroupUrl() {
-  const groupLink = [...document.querySelectorAll("a[href*='/groups/']")].find((anchor) => /\/groups\/[^/?#]+/.test(anchor.href));
-  return groupLink ? normalizeUrl(groupLink.href) : normalizeUrl(window.location.href);
+function isFacebookHomePage(url = window.location.href) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return /(^|\.)facebook\.com$/i.test(parsed.hostname) && (parsed.pathname === "/" || parsed.pathname === "/home.php");
+  } catch {
+    return false;
+  }
 }
 
 function isFacebookGroupPage(url = window.location.href) {
@@ -224,8 +258,26 @@ function isFacebookGroupPage(url = window.location.href) {
   }
 }
 
+function isSupportedCollectionPage(url = window.location.href) {
+  return isFacebookHomePage(url) || isFacebookGroupPage(url);
+}
+
+function findGroupName() {
+  if (/\/groups\/feed\/?$/i.test(location.pathname)) return "Facebook Groups Feed";
+  const heading = document.querySelector("h1");
+  const title = visibleText(heading);
+  if (title) return title;
+  return document.title.replace(/\| Facebook$/i, "").trim() || "Unknown Group";
+}
+
+function findGroupUrl() {
+  if (/\/groups\/feed\/?$/i.test(location.pathname)) return normalizeUrl(window.location.href);
+  const groupLink = [...document.querySelectorAll("a[href*='/groups/']")].find((anchor) => /\/groups\/[^/?#]+/.test(anchor.href));
+  return groupLink ? normalizeUrl(groupLink.href) : normalizeUrl(window.location.href);
+}
+
 function likelyPostContainers() {
-  const selectorGroups = [
+  const selectors = [
     "div[role='feed'] [role='article']",
     "div[role='feed'] [data-pagelet*='FeedUnit']",
     "div[role='feed'] [aria-posinset]",
@@ -234,36 +286,46 @@ function likelyPostContainers() {
     "div[role='main'] [aria-posinset]",
     "[role='article']",
     "[data-pagelet*='FeedUnit']",
-    "[aria-posinset]",
-    "[data-ad-preview='message']",
-    "[data-ad-comet-preview='message']",
-    "[data-testid='post_message']"
+    "[aria-posinset]"
   ];
-  const candidates = selectorGroups.flatMap((selector) => [...document.querySelectorAll(selector)]);
+  const candidates = selectors.flatMap((selector) => [...document.querySelectorAll(selector)]);
   const filtered = candidates.filter((element) => {
     const rect = element.getBoundingClientRect();
     const text = visibleText(element);
-    return isVisibleElement(element) && rect.bottom > 0 && rect.top < window.innerHeight * 1.35 && text.length >= 10;
+    const nestedArticle = element.parentElement?.closest?.("[role='article'], [data-pagelet*='FeedUnit'], [aria-posinset]");
+    return isVisibleElement(element) && !nestedArticle && rect.bottom > 0 && rect.top < window.innerHeight * 1.35 && text.length >= 10;
   });
   return [...new Set(filtered)];
 }
 
 function looksLikeTime(value) {
-  const text = (value || "").trim();
-  return /^(Just now|Now|Yesterday|\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))$/i.test(text) ||
-    /^(刚刚|刚才|昨天|\d+\s*(分钟|分|小时|天|周|星期)前?)$/.test(text);
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (/^(Just now|Now|Yesterday|\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))$/i.test(text)) return true;
+  return !Number.isNaN(new Date(text.replace(/ at /i, " ")).getTime());
 }
 
-function findRawTime(container) {
-  const direct = [...container.querySelectorAll("time, abbr, a[aria-label], span[aria-label], a[title], span[title]")];
-  for (const element of direct) {
-    const value = element.getAttribute("datetime") || element.getAttribute("aria-label") || element.getAttribute("title") || visibleText(element);
-    if (looksLikeTime(value)) return value.trim();
+function topSectionLimit(container) {
+  const rect = container.getBoundingClientRect();
+  return rect.top + Math.min(260, Math.max(120, rect.height * 0.42));
+}
+
+function isInTopSection(container, element) {
+  return element.getBoundingClientRect().top <= topSectionLimit(container);
+}
+
+function topSectionLines(container) {
+  const lines = [];
+  for (const child of [...container.children]) {
+    if (!isVisibleElement(child)) continue;
+    if (!isInTopSection(container, child) && lines.length >= 8) break;
+    for (const line of visibleLines(child)) {
+      if (/^(like|comment|share|send|write a comment|most relevant|view more comments?)$/i.test(line)) return lines;
+      lines.push(line);
+      if (lines.length >= 18) return lines;
+    }
   }
-  for (const line of visibleLines(container)) {
-    if (looksLikeTime(line)) return line;
-  }
-  return "";
+  return lines.length > 0 ? lines : visibleLines(container).slice(0, 18);
 }
 
 function findPostUrl(container) {
@@ -275,51 +337,76 @@ function findPostUrl(container) {
   return postLink ? normalizeUrl(postLink.href) : normalizeUrl(window.location.href);
 }
 
+function findRawTime(container) {
+  const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title]")]
+    .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
+    .map((element) => {
+      const value = [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("datetime"),
+        visibleText(element)
+      ].find((candidate) => looksLikeTime(candidate));
+      let score = 0;
+      if (value) score += 3;
+      if (element.tagName.toLowerCase() === "time" || element.getAttribute("datetime")) score += 2;
+      if (element.closest("a[href*='/posts/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='fbid=']")) score += 3;
+      if (element.tagName.toLowerCase() === "a") score += 1;
+      return { element, value: value || "", score };
+    })
+    .filter((item) => item.value)
+    .sort((a, b) => b.score - a.score || a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top);
+  if (candidates[0]?.value) return candidates[0].value.trim();
+  for (const line of topSectionLines(container)) {
+    if (looksLikeTime(line)) return line;
+  }
+  return "";
+}
+
 function findAuthor(container) {
-  const strong = container.querySelector("strong");
-  if (strong && visibleText(strong).length < 80) return visibleText(strong);
-  const authorLink = [...container.querySelectorAll("a[href]")].find((anchor) => {
-    const text = visibleText(anchor);
-    return text && text.length < 80 && !looksLikeTime(text) && !anchor.href.includes("/groups/") && !isNoiseLine(text);
-  });
-  return authorLink ? visibleText(authorLink) : "";
+  const candidates = [...container.querySelectorAll("strong, h2, h3, h4, a[href]")]
+    .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
+    .map((element) => ({ element, text: visibleText(element) }))
+    .filter(({ element, text }) => {
+      if (!text || text.length > 80) return false;
+      if (looksLikeTime(text) || isNoiseLine(text)) return false;
+      if (element.tagName.toLowerCase() === "a") {
+        const href = element.href || "";
+        if (href.includes("/groups/") || href.includes("/posts/") || href.includes("/permalink/") || href.includes("comment_id=")) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top);
+  return candidates[0]?.text || "";
 }
 
 function extractPostText(container, authorName, rawTimeText) {
   const messageSelectors = [
     "div[data-ad-preview='message']",
     "div[data-ad-comet-preview='message']",
-    "[data-testid='post_message']",
-    "[dir='auto']"
+    "[data-testid='post_message']"
   ];
   const candidateLines = [];
-
   for (const selector of messageSelectors) {
     for (const element of container.querySelectorAll(selector)) {
       const text = visibleText(element);
-      if (text && text.length >= 8) candidateLines.push(text);
+      if (!text || text.length < 8) continue;
+      if (element.closest("[aria-label*='comment' i], [aria-label*='reply' i], form")) continue;
+      candidateLines.push(text);
     }
   }
-
   if (candidateLines.length === 0) {
-    candidateLines.push(
-      ...visibleLines(container).filter((line) => {
-        if (line === authorName || line === rawTimeText) return false;
-        if (isNoiseLine(line)) return false;
-        return true;
-      })
-    );
+    candidateLines.push(...topSectionLines(container).filter((line) => {
+      if (line === authorName || line === rawTimeText) return false;
+      if (looksLikeTime(line) || isNoiseLine(line)) return false;
+      return true;
+    }));
   }
-
   const cleaned = candidateLines
     .map((line) => line.replace(authorName || "", "").replace(rawTimeText || "", "").trim())
     .filter((line) => !isNoiseLine(line))
     .filter((line, index, list) => list.indexOf(line) === index);
-
-  const meaningful = cleaned
-    .filter((line) => line.length >= 8)
-    .sort((a, b) => b.length - a.length);
-
+  const meaningful = cleaned.filter((line) => line.length >= 8).sort((a, b) => b.length - a.length);
   return meaningful[0] || cleaned.join(" ").slice(0, 500) || "";
 }
 
@@ -329,8 +416,7 @@ function extractPost(container) {
   const groupName = findGroupName();
   const groupUrl = findGroupUrl();
   const authorName = findAuthor(container);
-  const extractedText = extractPostText(container, authorName, rawTimeText);
-  const postText = extractedText || "未识别到正文";
+  const postText = extractPostText(container, authorName, rawTimeText) || "未识别到正文";
   const postId = hash([postUrl, postText.slice(0, 120), groupName, rawTimeText].join("|"));
   return {
     postId,
@@ -350,7 +436,7 @@ function extractPost(container) {
 
 function enabledKeywords(category) {
   if (!latestSettings?.keywords?.length) return fallbackKeywords[category] || [];
-  return (latestSettings?.keywords || [])
+  return latestSettings.keywords
     .filter((keyword) => keyword.enabled && keyword.category === category)
     .map((keyword) => String(keyword.text || "").trim().toLowerCase())
     .filter(Boolean);
@@ -364,12 +450,12 @@ function matchKeywords(text) {
 }
 
 function shouldKeepPost(post) {
-  if (!post.postText || post.postText === "未识别到正文") return { keep: false, positive: [], negative: [], reason: "正文未识别" };
-  if (isNoiseLine(post.postText)) return { keep: false, positive: [], negative: [], reason: "页面导航或交互噪音" };
+  if (!post.postText || post.postText === "未识别到正文") return { keep: false, positive: [], negative: [], reason: "未识别到正文" };
+  if (isNoiseLine(post.postText)) return { keep: false, positive: [], negative: [], reason: "采集到的是导航或交互文本" };
   const matches = matchKeywords(post.postText);
   if (matches.negative.length > 0) return { keep: false, ...matches, reason: `命中排除关键词：${matches.negative.join(", ")}` };
-  if (matches.positive.length === 0) return { keep: false, ...matches, reason: "未匹配高价值或普通关键词" };
-  return { keep: true, ...matches, reason: "关键词匹配" };
+  if (matches.positive.length === 0) return { keep: false, ...matches, reason: "未命中机会关键词" };
+  return { keep: true, ...matches, reason: "关键词匹配成功" };
 }
 
 function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {}) {
@@ -380,7 +466,7 @@ function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {
     commandType: "scan_result",
     command: "scan_result",
     success: true,
-    message: `本次扫描：发现 ${scannedCount} 条帖子，关键词匹配 ${matchedCount} 条，忽略 ${ignoredCount} 条`,
+    message: `本轮扫描发现 ${scannedCount} 条帖子，命中关键词 ${matchedCount} 条，忽略 ${ignoredCount} 条`,
     currentState: collecting ? "collecting" : "paused",
     pluginState: collecting ? "collecting" : "paused",
     timestamp: new Date().toISOString(),
@@ -389,11 +475,11 @@ function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {
 }
 
 function collectVisiblePosts({ allowSeen = false } = {}) {
-  if (!contextActive) return [];
-  if (!collecting) return [];
+  if (!contextActive || !collecting) return [];
+  const containers = likelyPostContainers();
   const scanned = [];
   const extractErrors = [];
-  const containers = likelyPostContainers();
+
   for (const container of containers) {
     try {
       const post = extractPost(container);
@@ -407,34 +493,33 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
       }
     }
   }
+
   const deliverable = [];
   const ignoredReasons = {};
   let matchedCount = 0;
   let unmatchedCount = 0;
   for (const post of scanned) {
     const decision = shouldKeepPost(post);
-    if (!post.postText || post.postText === "鏈瘑鍒埌姝ｆ枃") {
+    if (!post.postText || post.postText === "未识别到正文") {
       ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
       continue;
     }
     if (decision.positive.length > 0) matchedCount += 1;
     else unmatchedCount += 1;
-    if (decision.negative.length > 0) {
-      ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
-      continue;
-    }
-    if (!decision.keep && decision.reason !== "鏈尮閰嶉珮浠峰€兼垨鏅€氬叧閿瘝") {
+    if (!decision.keep) {
       ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
       continue;
     }
     deliverable.push(post);
   }
+
   const fresh = allowSeen ? deliverable : deliverable.filter((post) => {
     const key = post.postUrl && post.postUrl !== window.location.href ? post.postUrl : post.postId;
     if (seenKeys.has(key)) return false;
     seenKeys.add(key);
     return true;
   });
+
   sendScanLog(scanned.length, matchedCount, scanned.length - deliverable.length, "visible_posts", {
     containerCount: containers.length,
     deliverableCount: deliverable.length,
@@ -444,8 +529,24 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
     sentCount: fresh.length,
     extractErrors: extractErrors.slice(0, 5)
   });
+
   if (fresh.length > 0) postJson(LOCAL_POSTS, { clientId: contentClientId, posts: fresh });
   return fresh;
+}
+
+function observeFeed() {
+  if (feedObserver) feedObserver.disconnect();
+  const observerRoot = document.querySelector("div[role='feed']") || document.querySelector("[role='main']") || document.body;
+  if (!observerRoot || typeof MutationObserver === "undefined") return;
+  feedObserver = new MutationObserver(() => {
+    if (!collecting || !contextActive) return;
+    if (observerCollectTimer) clearTimeout(observerCollectTimer);
+    observerCollectTimer = setTimeout(() => {
+      observerCollectTimer = null;
+      collectVisiblePosts();
+    }, 900);
+  });
+  feedObserver.observe(observerRoot, { childList: true, subtree: true });
 }
 
 function startCollectLoop({ allowSeen = false } = {}) {
@@ -453,17 +554,17 @@ function startCollectLoop({ allowSeen = false } = {}) {
   if (collectTimer) clearInterval(collectTimer);
   collectVisiblePosts({ allowSeen });
   collectTimer = setInterval(() => collectVisiblePosts(), 4000);
+  observeFeed();
 }
 
 function pauseCollectLoop() {
   collecting = false;
   if (collectTimer) clearInterval(collectTimer);
+  if (observerCollectTimer) clearTimeout(observerCollectTimer);
+  if (feedObserver) feedObserver.disconnect();
   collectTimer = null;
-}
-
-function stopCollectLoop() {
-  pauseCollectLoop();
-  autoScrollStopped = true;
+  observerCollectTimer = null;
+  feedObserver = null;
 }
 
 function scrollCandidates() {
@@ -564,7 +665,6 @@ async function tryScrollOnce(preferredDistance) {
   window.focus();
   for (const target of scrollCandidates()) {
     const before = scrollTopOf(target);
-
     const forced = forceDomScroll(target, distance);
     await wait(180);
     let after = scrollTopOf(target);
@@ -603,7 +703,7 @@ async function tryScrollOnce(preferredDistance) {
   attempts.push({ method: "wheel-window", container: "window", beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY });
   return Math.abs(window.scrollY - beforeWindow) > 8
     ? { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "wheel-window", container: "window", attempts }
-    : { ok: false, code: "auto_scroll_failed", error: "没有找到可滚动容器，或 Facebook 忽略了脚本滚动事件", attempts };
+    : { ok: false, code: "auto_scroll_failed", error: "没有找到可滚动容器，或 Facebook 忽略了页面滚动事件", attempts };
 }
 
 function sendAck(commandId, commandType, success, message, currentState, details = {}) {
@@ -625,10 +725,9 @@ function sendAck(commandId, commandType, success, message, currentState, details
 
 async function startAutoScroll(commandId, total, delayMs) {
   autoScrollStopped = false;
-  collecting = true;
   startCollectLoop({ allowSeen: true });
   const initialPosts = collectVisiblePosts({ allowSeen: true });
-  sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前滑动次数：0 / ${total}`, "auto_scrolling", {
+  sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前进度 0 / ${total}`, "auto_scrolling", {
     currentStep: 0,
     totalSteps: total,
     delayMs,
@@ -651,7 +750,7 @@ async function startAutoScroll(commandId, total, delayMs) {
       commandId,
       "start_auto_scroll",
       scrollResult.ok,
-      scrollResult.ok ? `自动滚动第 ${current} 次完成，采集到 ${posts.length} 个新帖子` : `自动滚动第 ${current} 次失败：${scrollResult.error}`,
+      scrollResult.ok ? `自动滚动第 ${current} 次完成，本次采集到 ${posts.length} 条新帖子` : `自动滚动第 ${current} 次失败：${scrollResult.error}`,
       scrollResult.ok ? "auto_scrolling" : "error",
       {
         ...scrollResult,
@@ -673,37 +772,69 @@ async function startAutoScroll(commandId, total, delayMs) {
   });
 }
 
-function startGroupMonitor(commandId, intervalSeconds) {
-  collecting = true;
+function clearMonitorTimers() {
   if (monitorTimer) clearInterval(monitorTimer);
+  if (monitorReloadTimer) clearTimeout(monitorReloadTimer);
+  monitorTimer = null;
+  monitorReloadTimer = null;
+}
+
+function scheduleMonitorReload(intervalSeconds) {
+  if (monitorReloadTimer) clearTimeout(monitorReloadTimer);
+  if (!isFacebookGroupPage()) return;
+  if (!latestSettings?.groupMonitor?.autoRefreshEnabled) return;
+  const seconds = Math.max(60, Number(latestSettings?.groupMonitor?.autoRefreshSeconds || 120));
+  monitorReloadTimer = setTimeout(() => {
+    saveMonitorSession(intervalSeconds);
+    location.reload();
+  }, seconds * 1000);
+}
+
+function stopGroupMonitor() {
+  clearMonitorTimers();
+  clearMonitorSession();
+  pauseCollectLoop();
+}
+
+function startGroupMonitor(commandId, intervalSeconds, options = {}) {
+  const safeInterval = Math.max(30, Number(intervalSeconds) || 60);
+  const restored = Boolean(options.restored);
+  saveMonitorSession(safeInterval);
+  clearMonitorTimers();
+  startCollectLoop({ allowSeen: true });
   const run = () => {
     const posts = collectVisiblePosts();
-    sendAck(commandId, "start_group_monitor", true, `群组监控检查完成，发现 ${posts.length} 个新帖子`, "monitoring", {
+    scheduleMonitorReload(safeInterval);
+    sendAck(commandId, "start_group_monitor", true, restored ? `群组监控已恢复，本轮发现 ${posts.length} 条新帖子` : `群组监控检查完成，发现 ${posts.length} 条新帖子`, "monitoring", {
       groupName: findGroupName(),
       groupUrl: findGroupUrl(),
-      collectedCount: posts.length
+      collectedCount: posts.length,
+      autoRefreshEnabled: Boolean(latestSettings?.groupMonitor?.autoRefreshEnabled),
+      autoRefreshSeconds: Number(latestSettings?.groupMonitor?.autoRefreshSeconds || 0)
     });
   };
   run();
-  monitorTimer = setInterval(run, Math.max(30, Number(intervalSeconds) || 60) * 1000);
+  monitorTimer = setInterval(run, safeInterval * 1000);
 }
 
 async function diagnose(commandId) {
-  if (!isFacebookGroupPage()) {
-    sendAck(commandId, "diagnose", false, "Current page is not a Facebook group page. Open groups/feed or a specific group first.", "error", {
+  if (!isSupportedCollectionPage()) {
+    sendAck(commandId, "diagnose", false, "当前页面不是支持的 Facebook 采集页，请打开首页、groups/feed 或具体群组页。", "error", {
       facebookPage: location.href,
       contentScript: "injected",
-      groupPage: false
+      supportedCollectionPage: false
     });
     return;
   }
+  collecting = true;
   const posts = collectVisiblePosts({ allowSeen: true });
   const scrollResult = await tryScrollOnce();
+  collecting = false;
   sendAck(
     commandId,
     "diagnose",
     scrollResult.ok,
-    scrollResult.ok ? "连接诊断完成：当前状态可正常使用" : `测试滚动失败：${scrollResult.error}`,
+    scrollResult.ok ? "连接诊断完成，当前页面可正常使用" : `测试滚动失败：${scrollResult.error}`,
     scrollResult.ok ? "collecting" : "error",
     {
       localService: "正常",
@@ -720,10 +851,11 @@ async function runDesktopCommand(message) {
   if (!message || !message.type) return { ok: false, message: "空命令", currentState: "error" };
   if (message.type === "settings_updated") {
     latestSettings = message.payload;
-    return { ok: true, message: "关键词和配置已同步到 content script", currentState: collecting ? "collecting" : "paused" };
+    return { ok: true, message: "设置已同步到 content script", currentState: collecting ? "collecting" : "paused" };
   }
   if (message.type === "ping_content") return { ok: true, url: location.href, currentState: collecting ? "collecting" : "stopped" };
-  const requiresGroupPage = new Set([
+
+  const requiresCollectionPage = new Set([
     "collect_now",
     "collect_once",
     "start_collecting",
@@ -737,42 +869,60 @@ async function runDesktopCommand(message) {
     "stop_group_monitor",
     "stop_monitoring"
   ]);
-  if (requiresGroupPage.has(message.type) && !isFacebookGroupPage()) {
+
+  if (requiresCollectionPage.has(message.type) && !isSupportedCollectionPage()) {
     return {
       ok: false,
-      message: "Current page is not a Facebook group page. Open groups/feed or a specific group first.",
+      message: "当前页面不是支持的 Facebook 采集页，请打开首页、groups/feed 或具体群组页。",
       currentState: "error",
       url: location.href
     };
   }
+
+  if ((message.type === "start_group_monitor" || message.type === "start_monitoring") && !isFacebookGroupPage()) {
+    return {
+      ok: false,
+      message: "群组监控只支持 groups/feed 或具体群组页，Facebook 首页不参与自动刷新。",
+      currentState: "error",
+      url: location.href
+    };
+  }
+
   if (message.type === "collect_now" || message.type === "collect_once" || message.type === "start_collecting") {
     seenKeys.clear();
     startCollectLoop({ allowSeen: true });
     const posts = collectVisiblePosts({ allowSeen: true });
-    return { ok: true, message: `采集已启动，后台正在监听此 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" };
+    return { ok: true, message: `采集已启动，本轮发现 ${posts.length} 条新帖子`, count: posts.length, currentState: "collecting" };
   }
+
   if (message.type === "clear_posts") {
     seenKeys.clear();
-    return { ok: true, message: "插件采集缓存已清空", currentState: collecting ? "collecting" : "stopped" };
+    return { ok: true, message: "插件缓存已清空", currentState: collecting ? "collecting" : "stopped" };
   }
+
   if (message.type === "stop_collecting") {
-    stopCollectLoop();
+    pauseCollectLoop();
+    clearMonitorTimers();
     return { ok: true, message: "采集已停止", currentState: "stopped" };
   }
+
   if (message.type === "pause_collecting") {
     pauseCollectLoop();
     return { ok: true, message: "采集已暂停", currentState: "paused" };
   }
+
   if (message.type === "start_auto_scroll") {
     const total = Math.max(1, Number(message.payload?.count || 5));
     const delayMs = Math.max(1000, Number(message.payload?.delayMs || 3000));
     startAutoScroll(message.commandId || `content-${Date.now()}`, total, delayMs);
     return { ok: true, message: "自动滚动已启动", currentState: "auto_scrolling" };
   }
+
   if (message.type === "stop_auto_scroll") {
     autoScrollStopped = true;
     return { ok: true, message: "自动滚动已停止", currentState: collecting ? "collecting" : "paused" };
   }
+
   if (message.type === "test_scroll_once" || message.type === "scroll_once") {
     let result = await tryScrollOnce();
     if (!result.ok) {
@@ -780,21 +930,29 @@ async function runDesktopCommand(message) {
       result = debuggerResult.ok ? debuggerResult : { ...result, debuggerResult, error: `${result.error || "dom_scroll_failed"}; ${debuggerResult.error || "debugger_scroll_failed"}` };
     }
     const posts = result.ok ? await collectAfterScroll(2500) : [];
-    return { ...result, message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 个新帖子` : result.error, currentState: result.ok ? "collecting" : "error", collectedCount: posts.length };
+    return {
+      ...result,
+      message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 条新帖子` : result.error,
+      currentState: result.ok ? "collecting" : "error",
+      collectedCount: posts.length
+    };
   }
+
   if (message.type === "diagnose") {
     diagnose(message.commandId || `diag-${Date.now()}`);
     return { ok: true, message: "诊断已启动", currentState: "collecting" };
   }
+
   if (message.type === "start_group_monitor" || message.type === "start_monitoring") {
     startGroupMonitor(message.commandId || `monitor-${Date.now()}`, Number(message.payload?.intervalSeconds || 60));
     return { ok: true, message: "群组监控已启动", currentState: "monitoring" };
   }
+
   if (message.type === "stop_group_monitor" || message.type === "stop_monitoring") {
-    if (monitorTimer) clearInterval(monitorTimer);
-    monitorTimer = null;
+    stopGroupMonitor();
     return { ok: true, message: "群组监控已停止", currentState: "stopped" };
   }
+
   return { ok: false, message: `content script 未实现命令：${message.type}`, currentState: "error" };
 }
 
@@ -825,6 +983,12 @@ async function pollDesktopCommands() {
   }
 }
 
+function restoreMonitorIfNeeded() {
+  const session = readMonitorSession();
+  if (!session?.active || !isFacebookGroupPage() || monitorTimer) return;
+  startGroupMonitor(`restore-${Date.now()}`, Number(session.intervalSeconds || 60), { restored: true });
+}
+
 if (isExtensionContextValid()) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     runDesktopCommand(message).then(sendResponse);
@@ -832,7 +996,9 @@ if (isExtensionContextValid()) {
   });
 }
 
-// Collection is intentionally command-driven. The desktop app or popup must send
-// start_collecting/collect_now before this script scans the page.
-pollDesktopCommands();
-desktopPollTimer = setInterval(pollDesktopCommands, 3000);
+pollDesktopCommands().finally(() => {
+  restoreMonitorIfNeeded();
+});
+desktopPollTimer = setInterval(() => {
+  pollDesktopCommands();
+}, 3000);

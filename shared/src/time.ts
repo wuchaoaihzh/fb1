@@ -9,23 +9,23 @@ export interface ParsedTimeResult {
 
 const minutePatterns = [
   /^(\d+)\s*m(?:in|ins|inute|inutes)?$/i,
-  /^(\d+)\s*分钟(?:前)?$/,
-  /^(\d+)\s*分(?:钟)?前$/
+  /^(\d+)\s*minutes?$/i,
+  /^(\d+)\s*mins?$/i
 ];
 
 const hourPatterns = [
   /^(\d+)\s*h(?:r|rs|our|ours)?$/i,
-  /^(\d+)\s*小时(?:前)?$/
+  /^(\d+)\s*hours?$/i
 ];
 
 const dayPatterns = [
   /^(\d+)\s*d(?:ay|ays)?$/i,
-  /^(\d+)\s*天(?:前)?$/
+  /^(\d+)\s*days?$/i
 ];
 
 const weekPatterns = [
   /^(\d+)\s*w(?:eek|eeks)?$/i,
-  /^(\d+)\s*周(?:前)?$/
+  /^(\d+)\s*weeks?$/i
 ];
 
 function pad(value: number): string {
@@ -57,6 +57,21 @@ function matchNumbered(text: string, patterns: RegExp[], multiplier: number, now
   return null;
 }
 
+function parseAbsoluteTime(text: string, now: Date): ParsedTimeResult | null {
+  const normalized = text
+    .replace(/ at /i, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const diffMinutes = Math.max(0, Math.round((now.getTime() - parsed.getTime()) / 60_000));
+  return {
+    parsedPostTime: formatLocalDateTime(parsed),
+    timeConfidence: "medium",
+    minutesAgo: diffMinutes
+  };
+}
+
 export function parseFacebookTime(rawText: string | undefined, now = new Date()): ParsedTimeResult {
   const text = (rawText || "").trim().replace(/\s+/g, " ");
   const lower = text.toLowerCase();
@@ -69,11 +84,11 @@ export function parseFacebookTime(rawText: string | undefined, now = new Date())
     };
   }
 
-  if (["just now", "now", "刚刚"].includes(lower) || text === "刚才") {
+  if (["just now", "now"].includes(lower)) {
     return minusMinutes(now, 0);
   }
 
-  if (lower === "yesterday" || text === "昨天") {
+  if (lower === "yesterday") {
     return minusMinutes(now, 24 * 60);
   }
 
@@ -81,7 +96,8 @@ export function parseFacebookTime(rawText: string | undefined, now = new Date())
     matchNumbered(text, minutePatterns, 1, now) ||
     matchNumbered(text, hourPatterns, 60, now) ||
     matchNumbered(text, dayPatterns, 24 * 60, now) ||
-    matchNumbered(text, weekPatterns, 7 * 24 * 60, now) || {
+    matchNumbered(text, weekPatterns, 7 * 24 * 60, now) ||
+    parseAbsoluteTime(text, now) || {
       parsedPostTime: "时间未识别",
       timeConfidence: "unknown",
       statusNote: "时间未识别，需要人工确认"

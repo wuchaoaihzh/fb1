@@ -34,6 +34,9 @@ export interface RadarPost {
   statusNote: string;
   ignored?: boolean;
   handled?: boolean;
+  handledAt?: string;
+  handledColor?: string;
+  remark?: string;
 }
 
 export interface AlertSettings {
@@ -67,6 +70,8 @@ export interface GroupMonitorItem {
 export interface GroupMonitorSettings {
   enabled: boolean;
   defaultIntervalSeconds: 30 | 60 | 180 | 300;
+  autoRefreshEnabled: boolean;
+  autoRefreshSeconds: 60 | 120 | 180 | 300 | 600;
   groups: GroupMonitorItem[];
 }
 
