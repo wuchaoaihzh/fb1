@@ -715,7 +715,16 @@ async function pollDesktopCommands() {
   if (data?.settings) latestSettings = data.settings;
   if (Array.isArray(data?.commands)) {
     for (const command of data.commands) {
-      const response = await runDesktopCommand(command);
+      let response;
+      try {
+        response = await runDesktopCommand(command);
+      } catch (error) {
+        response = {
+          ok: false,
+          message: `content_command_failed: ${String(error?.message || error)}`,
+          currentState: "error"
+        };
+      }
       if (command.commandId) {
         sendAck(command.commandId, command.type, response.ok !== false, response.message || "命令已执行", response.currentState || (response.ok === false ? "error" : "collecting"), { ...response, url: location.href });
       }
