@@ -13,6 +13,7 @@ interface AppState {
   posts: RadarPost[];
   settings: RadarSettings;
   collectionState: CollectionState;
+  appVersion?: string;
   operationLog: OperationLog[];
   stats: RadarStats;
   clients: ExtensionClientInfo[];
@@ -75,7 +76,7 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", operationLog: [], stats: emptyStats, clients: [] });
+  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.1", operationLog: [], stats: emptyStats, clients: [] });
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
@@ -259,7 +260,14 @@ function App() {
       return;
     }
     setSelectedPost(null);
-    await command("clear", undefined, "正在清空数据");
+    const result = await command("clear", undefined, "正在清空数据");
+    if (result?.ok !== false) {
+      setState((previous) => ({
+        ...previous,
+        posts: [],
+        stats: { ...previous.stats, totalPosts: 0, newPosts: 0, todayPosts: 0, alertedPosts: 0, unknownTimePosts: 0 }
+      }));
+    }
   };
 
   const testSound = async () => {
@@ -297,7 +305,7 @@ function App() {
       {toast && <div className="toast">{toast}</div>}
       <header className="topbar">
         <div>
-          <h1>Facebook Opportunity Radar</h1>
+          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.1"}</span></h1>
           <p>只读取当前浏览器已登录且可见的 Facebook 群组页面，不自动评论，不绕过权限。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}><Radio size={18} />{socketReady ? "本地服务已连接" : "本地服务未连接"}</div>

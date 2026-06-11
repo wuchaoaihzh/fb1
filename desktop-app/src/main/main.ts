@@ -24,6 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const serverPort = 8765;
+const appVersion = "0.1.1";
 app.setName("Facebook Opportunity Radar");
 
 let mainWindow: BrowserWindow | null = null;
@@ -217,6 +218,7 @@ function appState() {
       posts: [...posts.values()].sort((a, b) => b.collectedAt.localeCompare(a.collectedAt)),
       settings,
       collectionState,
+      appVersion,
       operationLog,
       stats: stats(),
       clients: [...clients.values(), ...activeHttpClients(new Set([...clients.values()].map((client) => client.clientId)))]
@@ -559,7 +561,7 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
       });
     }
     broadcastState();
-    return { ok: true, clearedCount: count };
+    return { ok: true, success: true, clearedCount: count, message: `已清空当前数据，共清除 ${count} 条帖子` };
   }
   if (command === "mark-handled" && typeof payload === "string") {
     const post = [...posts.values()].find((item) => item.postId === payload);
