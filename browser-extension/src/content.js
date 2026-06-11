@@ -377,10 +377,11 @@ function currentPhotoIdentifiers(url = window.location.href) {
     const parsed = new URL(url, window.location.href);
     const photoId = parsed.searchParams.get("fbid") || "";
     const setValue = parsed.searchParams.get("set") || "";
-    const postId = (setValue.match(/(?:^|[.:])(pcb|story_fbid)\.(\d+)/i)?.[2]) || parsed.searchParams.get("story_fbid") || "";
-    return { photoId, postId };
+    const mediaSetToken = setValue || "";
+    const postId = (setValue.match(/(?:^|[.:])([a-z_]+)\.(\d+)/i)?.[2]) || parsed.searchParams.get("story_fbid") || "";
+    return { photoId, postId, mediaSetToken };
   } catch {
-    return { photoId: "", postId: "" };
+    return { photoId: "", postId: "", mediaSetToken: "" };
   }
 }
 
@@ -425,7 +426,7 @@ function nearestRegexMatch(text, pattern, anchorIndex) {
 }
 
 function findPhotoStoryFromRawScriptText(text, identifiers) {
-  const { photoId = "", postId = "" } = identifiers || {};
+  const { photoId = "", postId = "", mediaSetToken = "" } = identifiers || {};
   if (!text || (!photoId && !postId)) return null;
 
   const markers = [
@@ -434,7 +435,12 @@ function findPhotoStoryFromRawScriptText(text, identifiers) {
     postId ? `post_id\\":\\"${postId}\\"` : "",
     postId ? `story_fbid":["${postId}"]` : "",
     postId ? `story_fbid\\":[\\"${postId}\\"]` : "",
+    mediaSetToken ? `mediasetToken":"${mediaSetToken}"` : "",
+    mediaSetToken ? `mediasetToken\\":\\"${mediaSetToken}\\"` : "",
+    postId ? `mediasetToken":"gm.${postId}"` : "",
+    postId ? `mediasetToken\\":\\"gm.${postId}\\"` : "",
     postId ? `mediasetToken":"pcb.${postId}"` : "",
+    postId ? `mediasetToken\\":\\"pcb.${postId}\\"` : "",
     photoId ? `"nodeID":"${photoId}"` : "",
     photoId ? `"id":"${photoId}"` : "",
     photoId ? `fbid=${photoId}` : ""
@@ -550,17 +556,18 @@ function formatPhotoFallbackTime(timestampMs) {
 
 function findPhotoStoryFallback() {
   if (!isFacebookPhotoPage()) return null;
-  const { photoId, postId } = currentPhotoIdentifiers();
+  const { photoId, postId, mediaSetToken } = currentPhotoIdentifiers();
   const candidates = [];
   for (const script of document.querySelectorAll("script[type='application/json'], script")) {
     const text = script.textContent || "";
     if (!text) continue;
     const mayContainCurrentPhoto = Boolean(photoId && text.includes(photoId));
     const mayContainCurrentPost = Boolean(postId && text.includes(postId));
+    const mayContainCurrentMediaSet = Boolean(mediaSetToken && text.includes(mediaSetToken));
     const hasPhotoMarkers = text.includes("CometPhotoRootContentQuery") || text.includes("shareable_from_perspective_of_feed_ufi");
     const hasTimeMarkers = text.includes("publish_time") || text.includes("creation_time");
-    if (!mayContainCurrentPhoto && !mayContainCurrentPost && !hasPhotoMarkers && !hasTimeMarkers) continue;
-    const textFallback = findPhotoStoryFromRawScriptText(text, { photoId, postId });
+    if (!mayContainCurrentPhoto && !mayContainCurrentPost && !mayContainCurrentMediaSet && !hasPhotoMarkers && !hasTimeMarkers) continue;
+    const textFallback = findPhotoStoryFromRawScriptText(text, { photoId, postId, mediaSetToken });
     if (textFallback) candidates.push(textFallback);
     const parsed = parseJsonScriptText(text);
     if (!parsed) continue;
