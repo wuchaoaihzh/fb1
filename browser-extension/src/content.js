@@ -184,6 +184,13 @@ function visibleLines(element) {
     .filter(Boolean);
 }
 
+function isVisibleElement(element) {
+  if (!element) return false;
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+}
+
 function isNoiseLine(line) {
   const text = line.trim();
   const lower = text.toLowerCase();
@@ -209,16 +216,27 @@ function findGroupUrl() {
 }
 
 function likelyPostContainers() {
-  const candidates = [
-    ...document.querySelectorAll("[role='article']"),
-    ...document.querySelectorAll("[data-pagelet*='FeedUnit']"),
-    ...document.querySelectorAll("[aria-posinset]")
-  ].filter((element) => {
+  const selectorGroups = [
+    "div[role='feed'] [role='article']",
+    "div[role='feed'] [data-pagelet*='FeedUnit']",
+    "div[role='feed'] [aria-posinset]",
+    "div[role='main'] [role='article']",
+    "div[role='main'] [data-pagelet*='FeedUnit']",
+    "div[role='main'] [aria-posinset]",
+    "[role='article']",
+    "[data-pagelet*='FeedUnit']",
+    "[aria-posinset]",
+    "[data-ad-preview='message']",
+    "[data-ad-comet-preview='message']",
+    "[data-testid='post_message']"
+  ];
+  const candidates = selectorGroups.flatMap((selector) => [...document.querySelectorAll(selector)]);
+  const filtered = candidates.filter((element) => {
     const rect = element.getBoundingClientRect();
     const text = visibleText(element);
-    return rect.bottom > 0 && rect.top < window.innerHeight * 1.25 && text.length >= 20;
+    return isVisibleElement(element) && rect.bottom > 0 && rect.top < window.innerHeight * 1.35 && text.length >= 10;
   });
-  return [...new Set(candidates)];
+  return [...new Set(filtered)];
 }
 
 function looksLikeTime(value) {
@@ -366,7 +384,8 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
   if (!collecting) return [];
   const scanned = [];
   const extractErrors = [];
-  for (const container of likelyPostContainers()) {
+  const containers = likelyPostContainers();
+  for (const container of containers) {
     try {
       const post = extractPost(container);
       if (post.postText.length >= 8 && !isNoiseLine(post.postText)) scanned.push(post);
@@ -395,7 +414,7 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
     seenKeys.add(key);
     return true;
   });
-  sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { ignoredReasons, sentCount: fresh.length, extractErrors: extractErrors.slice(0, 5) });
+  sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { containerCount: containers.length, ignoredReasons, sentCount: fresh.length, extractErrors: extractErrors.slice(0, 5) });
   if (fresh.length > 0) postJson(LOCAL_POSTS, { clientId: contentClientId, posts: fresh });
   return fresh;
 }
