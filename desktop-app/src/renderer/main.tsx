@@ -76,7 +76,7 @@ function StatCard({ label, value }: { label: string; value: number | string }) {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.1", operationLog: [], stats: emptyStats, clients: [] });
+  const [state, setState] = useState<AppState>({ posts: [], settings: defaultSettings, collectionState: "stopped", appVersion: "0.1.2", operationLog: [], stats: emptyStats, clients: [] });
   const [draftSettings, setDraftSettings] = useState<RadarSettings>(defaultSettings);
   const [socketReady, setSocketReady] = useState(false);
   const [scrollCount, setScrollCount] = useState(defaultSettings.autoScroll.defaultScrollCount);
@@ -158,12 +158,12 @@ function App() {
     setTimeout(() => setToast(""), 3200);
   };
 
-  const command = async (name: string, payload?: unknown, feedback?: string) => {
-    if (feedback) notify(feedback);
+  const command = async (name: string, payload?: unknown, feedback?: string, options?: { silent?: boolean }) => {
+    if (feedback && !options?.silent) notify(feedback);
     const result = await window.radarApi?.command(name, payload) as { sent?: boolean; ack?: boolean; success?: boolean; message?: string; ok?: boolean } | undefined;
-    if (result?.message) {
+    if (result?.message && !options?.silent) {
       notify(result.success === false || result.ok === false ? `操作失败：${result.message}` : result.message);
-    } else if (result?.sent === false) {
+    } else if (result?.sent === false && !options?.silent) {
       notify("命令发送失败，请查看运行日志");
     }
     return result;
@@ -305,7 +305,7 @@ function App() {
       {toast && <div className="toast">{toast}</div>}
       <header className="topbar">
         <div>
-          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.1"}</span></h1>
+          <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.2"}</span></h1>
           <p>只读取当前浏览器已登录且可见的 Facebook 群组页面，不自动评论，不绕过权限。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}><Radio size={18} />{socketReady ? "本地服务已连接" : "本地服务未连接"}</div>
@@ -322,11 +322,11 @@ function App() {
       </section>
 
       <section className="toolbar">
-        <button onClick={() => command("start", undefined, "开始采集命令已发送")}><Play size={16} />开始采集</button>
-        <button onClick={() => command("pause", undefined, "暂停采集命令已发送")}><Pause size={16} />暂停采集</button>
-        <button onClick={() => command("stop", undefined, "停止采集命令已发送")}><Square size={16} />停止采集</button>
+        <button onClick={() => command("start", undefined, undefined, { silent: true })}><Play size={16} />开始采集</button>
+        <button onClick={() => command("pause", undefined, undefined, { silent: true })}><Pause size={16} />暂停采集</button>
+        <button onClick={() => command("stop", undefined, undefined, { silent: true })}><Square size={16} />停止采集</button>
         <button onClick={() => command("diagnose", undefined, "连接诊断命令已发送")}><Radio size={16} />测试连接</button>
-        <button onClick={() => command("test-collect", undefined, "测试采集一次命令已发送")}><Search size={16} />测试采集一次</button>
+        <button onClick={() => command("test-collect", undefined, undefined, { silent: true })}><Search size={16} />测试采集一次</button>
         <button onClick={() => command("test-scroll", undefined, "测试滚动一次命令已发送")}><Zap size={16} />测试滚动一次</button>
         <button onClick={clearData}><Trash2 size={16} />清空数据</button>
         <button onClick={() => command("export-xlsx")}><FileSpreadsheet size={16} />导出 Excel</button>

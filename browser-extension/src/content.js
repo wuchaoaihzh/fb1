@@ -320,39 +320,63 @@ async function wait(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function humanScrollBy(target, distance) {
+  const steps = 10;
+  const stepDistance = Math.max(40, Math.floor(distance / steps));
+  for (let index = 0; index < steps; index += 1) {
+    if (target === window) {
+      window.scrollBy(0, stepDistance);
+    } else if (target === document.body || target === document.documentElement || target === document.scrollingElement) {
+      window.scrollBy(0, stepDistance);
+      if (typeof target.scrollBy === "function") target.scrollBy(0, stepDistance);
+      else target.scrollTop = (target.scrollTop || 0) + stepDistance;
+    } else if (typeof target.scrollBy === "function") {
+      target.scrollBy(0, stepDistance);
+    } else {
+      target.scrollTop = (target.scrollTop || 0) + stepDistance;
+    }
+    await wait(45 + Math.floor(Math.random() * 55));
+  }
+}
+
 async function tryScrollOnce(preferredDistance) {
   const distance = Math.floor(preferredDistance || (600 + Math.random() * 600));
+  const attempts = [];
+  window.focus();
   for (const target of scrollCandidates()) {
     const before = scrollTopOf(target);
 
-    if (typeof target.scrollBy === "function") target.scrollBy({ top: distance, behavior: "auto" });
-    else target.scrollTop = before + distance;
-    await wait(180);
+    await humanScrollBy(target, distance);
+    await wait(260);
     let after = scrollTopOf(target);
+    attempts.push({ method: "human-scrollBy", container: target.tagName || "document", beforeScrollTop: before, afterScrollTop: after });
     if (Math.abs(after - before) > 8) {
-      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "scrollBy", container: target.tagName || "unknown" };
+      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "human-scrollBy", container: target.tagName || "document", attempts };
     }
 
     dispatchWheel(target, distance);
-    await wait(220);
+    await wait(360);
     after = scrollTopOf(target);
+    attempts.push({ method: "wheel", container: target.tagName || "document", beforeScrollTop: before, afterScrollTop: after });
     if (Math.abs(after - before) > 8) {
-      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "wheel", container: target.tagName || "unknown" };
+      return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "wheel", container: target.tagName || "document", attempts };
     }
   }
 
   const beforeWindow = window.scrollY;
-  window.scrollBy({ top: distance, behavior: "auto" });
-  await wait(180);
+  await humanScrollBy(window, distance);
+  await wait(260);
+  attempts.push({ method: "window-human-scrollBy", container: "window", beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY });
   if (Math.abs(window.scrollY - beforeWindow) > 8) {
-    return { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "window.scrollBy", container: "window" };
+    return { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "window-human-scrollBy", container: "window", attempts };
   }
 
   dispatchWheel(document.scrollingElement || document.body, distance);
-  await wait(220);
+  await wait(360);
+  attempts.push({ method: "wheel-window", container: "window", beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY });
   return Math.abs(window.scrollY - beforeWindow) > 8
-    ? { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "wheel-window", container: "window" }
-    : { ok: false, code: "auto_scroll_failed", error: "没有找到可滚动容器，或页面已经到底部" };
+    ? { ok: true, distance, beforeScrollTop: beforeWindow, afterScrollTop: window.scrollY, method: "wheel-window", container: "window", attempts }
+    : { ok: false, code: "auto_scroll_failed", error: "没有找到可滚动容器，或 Facebook 忽略了脚本滚动事件", attempts };
 }
 
 function sendAck(commandId, commandType, success, message, currentState, details = {}) {

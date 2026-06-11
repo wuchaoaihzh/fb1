@@ -29,6 +29,9 @@ async function getActiveFacebookTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const activeTab = tabs[0];
   if (activeTab?.id && /^https:\/\/(www\.)?facebook\.com\//.test(activeTab.url || "")) return activeTab;
+  const activeTabs = await chrome.tabs.query({ active: true });
+  const activeFacebookTab = activeTabs.find((tab) => tab.id && /^https:\/\/(www\.)?facebook\.com\//.test(tab.url || ""));
+  if (activeFacebookTab) return activeFacebookTab;
   const facebookTabs = await listFacebookTabs();
   return facebookTabs.find((tab) => tab.id);
 }
