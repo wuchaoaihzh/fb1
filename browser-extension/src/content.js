@@ -922,6 +922,11 @@ function isRelativeTimeText(value) {
   return /^(?:just now|now|today|yesterday|about an hour ago|\d+\s*(?:[mM]|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks))$/i.test(text);
 }
 
+function isAbsoluteTimeText(value) {
+  const fragment = extractTimeFragment(value);
+  return Boolean(fragment) && !isRelativeTimeText(fragment);
+}
+
 function looksLikeTime(value) {
   return Boolean(extractTimeFragment(value));
 }
@@ -954,7 +959,7 @@ function findPostUrl(container) {
   return postLink ? normalizeUrl(postLink.href) : normalizeUrl(window.location.href);
 }
 
-function findRawTime(container) {
+async function findRawTime(container) {
   const preferredPostUrl = findPostUrl(container);
   if (isFacebookPhotoPage()) {
     const textRows = [secondTopSectionRow(container), firstTopSectionRow(container), container]
@@ -991,11 +996,24 @@ function findRawTime(container) {
       if (hasVisibleText) score += 2;
       if (orderedText && orderedText !== visibleText(element)) score += 4;
       if (element.getAttribute("data-utime") && isFacebookPhotoPage() && !hasVisibleText) score -= 2;
-      return { element, value: value || "", score };
+      return { element, value: value || "", score, anchorHref };
     })
     .filter((item) => item.value)
     .sort((a, b) => b.score - a.score || a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top);
-  if (candidates[0]?.value) return candidates[0].value.trim();
+  const topCandidate = candidates[0];
+  if (topCandidate?.value && isAbsoluteTimeText(topCandidate.value)) return topCandidate.value.trim();
+  if ((isFacebookPhotoPage() || preferredPostUrl.includes("/groups/")) && candidates.length > 0) {
+    const hoverCandidates = candidates
+      .filter((item) => item.anchorHref === preferredPostUrl || item.element === topCandidate?.element)
+      .concat(candidates)
+      .filter((item, index, list) => list.findIndex((entry) => entry.element === item.element) === index)
+      .slice(0, 3);
+    for (const item of hoverCandidates) {
+      const tooltipValue = await hoverForTooltipTime(item.element);
+      if (tooltipValue) return tooltipValue;
+    }
+  }
+  if (topCandidate?.value) return topCandidate.value.trim();
   for (const line of topSectionLines(container)) {
     const fragment = extractTimeFragment(line);
     if (fragment) return fragment;
@@ -1089,13 +1107,13 @@ function extractPostText(container, authorName, rawTimeText) {
   return meaningful[0] || cleaned.join(" ").slice(0, 500) || "";
 }
 
-function extractPost(container) {
+async function extractPost(container) {
   const contextContainer = findPhotoPostContext(container);
   const domPostUrl = findPostUrl(contextContainer);
   const photoFallback = findPhotoStoryFallback();
   const scriptFallback = photoFallback || findStoryScriptFallback(domPostUrl);
   const pageReferenceTimeMs = getPageReferenceTimeMs();
-  const domRawTimeText = findRawTime(contextContainer);
+  const domRawTimeText = await findRawTime(contextContainer);
   const postUrl = scriptFallback?.postUrl || domPostUrl;
   const fallbackRawTimeText = scriptFallback ? normalizePhotoTimeText(scriptFallback.displayTimeText, scriptFallback.rawTimestamp) : "";
   const rawTimeText = scriptFallback && (!domRawTimeText || isRelativeTimeText(domRawTimeText))
@@ -1163,7 +1181,7 @@ function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {
   });
 }
 
-function collectVisiblePosts({ allowSeen = false } = {}) {
+async function collectVisiblePosts({ allowSeen = false } = {}) {
   if (!contextActive || !collecting) return [];
   const containers = likelyPostContainers();
   const scanned = [];
@@ -1171,7 +1189,7 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
 
   for (const container of containers) {
     try {
-      const post = extractPost(container);
+      const post = await extractPost(container);
       if (post.postText.length >= 8 && !isNoiseLine(post.postText)) scanned.push(post);
     } catch (error) {
       const message = String(error?.message || error);
@@ -1232,7 +1250,7 @@ function observeFeed() {
     if (observerCollectTimer) clearTimeout(observerCollectTimer);
     observerCollectTimer = setTimeout(() => {
       observerCollectTimer = null;
-      collectVisiblePosts();
+      void collectVisiblePosts();
     }, 900);
   });
   feedObserver.observe(observerRoot, { childList: true, subtree: true });
@@ -1241,8 +1259,8 @@ function observeFeed() {
 function startCollectLoop({ allowSeen = false } = {}) {
   collecting = true;
   if (collectTimer) clearInterval(collectTimer);
-  collectVisiblePosts({ allowSeen });
-  collectTimer = setInterval(() => collectVisiblePosts(), 4000);
+  void collectVisiblePosts({ allowSeen });
+  collectTimer = setInterval(() => { void collectVisiblePosts(); }, 4000);
   observeFeed();
 }
 
@@ -1305,13 +1323,107 @@ async function wait(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function dispatchHoverEvent(target, type, eventInit) {
+  const EventCtor = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+  target.dispatchEvent(new EventCtor(type, eventInit));
+}
+
+function relatedTooltipNodes(target) {
+  const ids = [
+    target?.getAttribute?.("aria-describedby"),
+    target?.closest?.("[aria-describedby]")?.getAttribute?.("aria-describedby")
+  ]
+    .flatMap((value) => String(value || "").split(/\s+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return ids
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+}
+
+function visibleTooltipTimeTexts() {
+  const tooltipNodes = [...document.querySelectorAll("[role='tooltip']")]
+    .filter((element) => isVisibleElement(element));
+  return tooltipNodes
+    .map((element) => visibleText(element))
+    .map((text) => String(text || "").replace(/\s+/g, " ").trim())
+    .filter((text) => isAbsoluteTimeText(text));
+}
+
+async function hoverForTooltipTime(element) {
+  if (!element || !isVisibleElement(element)) return "";
+  const target = element.closest("a[href], [role='link']") || element;
+  if (typeof target.scrollIntoView === "function") {
+    target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+    await wait(80);
+  }
+  const rect = target.getBoundingClientRect();
+  const clientX = Math.max(4, Math.min(window.innerWidth - 4, Math.floor(rect.left + Math.min(Math.max(rect.width / 2, 8), Math.max(rect.width - 8, 8)))));
+  const clientY = Math.max(4, Math.min(window.innerHeight - 4, Math.floor(rect.top + Math.min(Math.max(rect.height / 2, 8), Math.max(rect.height - 8, 8)))));
+  const eventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    clientX,
+    clientY,
+    pageX: clientX + window.scrollX,
+    pageY: clientY + window.scrollY,
+    screenX: clientX,
+    screenY: clientY,
+    buttons: 0,
+    button: 0,
+    pointerType: "mouse",
+    relatedTarget: null,
+    view: window
+  };
+  const hoverTargets = [target, document.elementFromPoint(clientX, clientY)]
+    .filter(Boolean)
+    .filter((item, index, list) => list.indexOf(item) === index);
+
+  if (typeof target.focus === "function") {
+    try {
+      target.focus({ preventScroll: true });
+    } catch {
+      target.focus();
+    }
+  }
+
+  for (const type of ["pointerenter", "mouseenter", "pointerover", "mouseover", "pointermove", "mousemove"]) {
+    for (const hoverTarget of hoverTargets) dispatchHoverEvent(hoverTarget, type, eventInit);
+  }
+
+  for (const delayMs of [120, 220, 360, 520]) {
+    await wait(delayMs);
+    for (const hoverTarget of hoverTargets) dispatchHoverEvent(hoverTarget, "mousemove", eventInit);
+    const texts = visibleTooltipTimeTexts();
+    const describedTexts = relatedTooltipNodes(target)
+      .filter((node) => isVisibleElement(node))
+      .map((node) => visibleText(node))
+      .map((text) => String(text || "").replace(/\s+/g, " ").trim())
+      .filter((text) => isAbsoluteTimeText(text));
+    const bestText = texts[0] || describedTexts[0] || "";
+    if (bestText) {
+      for (const type of ["pointerout", "mouseout", "mouseleave", "pointerleave"]) {
+        for (const hoverTarget of hoverTargets) dispatchHoverEvent(hoverTarget, type, eventInit);
+      }
+      return bestText;
+    }
+  }
+
+  for (const type of ["pointerout", "mouseout", "mouseleave", "pointerleave"]) {
+    for (const hoverTarget of hoverTargets) dispatchHoverEvent(hoverTarget, type, eventInit);
+  }
+  return "";
+}
+
 async function collectAfterScroll(delayMs) {
   const settleMs = Math.max(1200, Math.min(2500, Math.floor((delayMs || 3000) * 0.5)));
   await wait(settleMs);
-  let posts = collectVisiblePosts();
+  let posts = await collectVisiblePosts();
   if (posts.length === 0) {
     await wait(900);
-    posts = collectVisiblePosts();
+    posts = await collectVisiblePosts();
   }
   return posts;
 }
@@ -1415,7 +1527,7 @@ function sendAck(commandId, commandType, success, message, currentState, details
 async function startAutoScroll(commandId, total, delayMs) {
   autoScrollStopped = false;
   startCollectLoop({ allowSeen: true });
-  const initialPosts = collectVisiblePosts({ allowSeen: true });
+  const initialPosts = await collectVisiblePosts({ allowSeen: true });
   sendAck(commandId, "start_auto_scroll", true, `自动滚动已启动，当前进度 0 / ${total}`, "auto_scrolling", {
     currentStep: 0,
     totalSteps: total,
@@ -1491,8 +1603,8 @@ function startGroupMonitor(commandId, intervalSeconds, options = {}) {
   saveMonitorSession(safeInterval);
   clearMonitorTimers();
   startCollectLoop({ allowSeen: true });
-  const run = () => {
-    const posts = collectVisiblePosts();
+  const run = async () => {
+    const posts = await collectVisiblePosts();
     scheduleMonitorReload(safeInterval);
     sendAck(commandId, "start_group_monitor", true, restored ? `群组监控已恢复，本轮发现 ${posts.length} 条新帖子` : `群组监控检查完成，发现 ${posts.length} 条新帖子`, "monitoring", {
       groupName: findGroupName(),
@@ -1502,8 +1614,8 @@ function startGroupMonitor(commandId, intervalSeconds, options = {}) {
       autoRefreshSeconds: Number(latestSettings?.groupMonitor?.autoRefreshSeconds || 0)
     });
   };
-  run();
-  monitorTimer = setInterval(run, safeInterval * 1000);
+  void run();
+  monitorTimer = setInterval(() => { void run(); }, safeInterval * 1000);
 }
 
 async function diagnose(commandId) {
@@ -1516,7 +1628,7 @@ async function diagnose(commandId) {
     return;
   }
   collecting = true;
-  const posts = collectVisiblePosts({ allowSeen: true });
+  const posts = await collectVisiblePosts({ allowSeen: true });
   const scrollResult = await tryScrollOnce();
   collecting = false;
   sendAck(
@@ -1580,7 +1692,7 @@ async function runDesktopCommand(message) {
   if (message.type === "collect_now" || message.type === "collect_once" || message.type === "start_collecting") {
     seenKeys.clear();
     startCollectLoop({ allowSeen: true });
-    const posts = collectVisiblePosts({ allowSeen: true });
+    const posts = await collectVisiblePosts({ allowSeen: true });
     return { ok: true, message: `采集已启动，本轮发现 ${posts.length} 条新帖子`, count: posts.length, currentState: "collecting" };
   }
 
