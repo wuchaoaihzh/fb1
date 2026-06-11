@@ -81,6 +81,43 @@ async function sendToFacebookTab(message) {
   }
 }
 
+async function sendToAllFacebookTabs(message) {
+  const tabs = await listFacebookTabs();
+  if (tabs.length === 0) {
+    return { ok: false, error: "未检测到任何已打开的 Facebook 页面" };
+  }
+
+  const results = [];
+  for (const tab of tabs) {
+    if (!tab.id) continue;
+    try {
+      await ensureContentScript(tab.id);
+      if (latestSettings) {
+        await chrome.tabs.sendMessage(tab.id, { type: "settings_updated", payload: latestSettings }).catch(() => undefined);
+      }
+      const response = await chrome.tabs.sendMessage(tab.id, { ...message, targetTabId: tab.id, targetTabUrl: tab.url });
+      results.push({ ok: response?.ok !== false, ...response, tabId: tab.id, url: tab.url, title: tab.title });
+    } catch (error) {
+      results.push({
+        ok: false,
+        error: `发送到 Facebook 页面失败：${String(error?.message || error)}`,
+        tabId: tab.id,
+        url: tab.url,
+        title: tab.title
+      });
+    }
+  }
+
+  const successCount = results.filter((item) => item.ok !== false).length;
+  return {
+    ok: successCount > 0,
+    message: successCount > 0 ? `命令已发送到 ${successCount}/${results.length} 个 Facebook 页面` : "命令未能发送到任何 Facebook 页面",
+    tabCount: results.length,
+    successCount,
+    results
+  };
+}
+
 async function postAck(ack) {
   const payload = {
     ...ack,
@@ -171,28 +208,28 @@ async function runExtensionCommand(message) {
       };
       nextState = extensionState;
     } else if (commandType === "collect_once") {
-      result = await sendToFacebookTab({ ...message, type: "collect_now" });
+      result = await sendToAllFacebookTabs({ ...message, type: "collect_now" });
       nextState = result.ok === false ? "error" : "collecting";
     } else if (commandType === "scroll_once") {
-      result = await sendToFacebookTab({ ...message, type: "test_scroll_once" });
+      result = await sendToAllFacebookTabs({ ...message, type: "test_scroll_once" });
       nextState = result.ok === false ? "error" : extensionState === "stopped" ? "collecting" : extensionState;
     } else if (commandType === "clear_posts") {
-      result = await sendToFacebookTab(message);
+      result = await sendToAllFacebookTabs(message);
       nextState = result.ok === false ? "error" : extensionState;
     } else if (commandType === "start_collecting") {
-      result = await sendToFacebookTab(message);
+      result = await sendToAllFacebookTabs(message);
       nextState = result.ok === false ? "error" : "collecting";
     } else if (commandType === "pause_collecting") {
-      result = await sendToFacebookTab(message);
+      result = await sendToAllFacebookTabs(message);
       nextState = result.ok === false ? "error" : "paused";
     } else if (commandType === "stop_collecting") {
-      result = await sendToFacebookTab(message);
+      result = await sendToAllFacebookTabs(message);
       nextState = result.ok === false ? "error" : "stopped";
     } else if (commandType === "start_auto_scroll") {
-      result = await sendToFacebookTab(message);
+      result = await sendToAllFacebookTabs(message);
       nextState = result.ok === false ? "error" : "auto_scrolling";
     } else if (commandType === "stop_auto_scroll") {
-      result = await sendToFacebookTab(message);
+      result = await sendToAllFacebookTabs(message);
       nextState = result.ok === false ? "error" : "collecting";
     } else if (commandType === "diagnose" || commandType === "start_group_monitor" || commandType === "stop_group_monitor" || commandType === "start_monitoring" || commandType === "stop_monitoring") {
       result = await sendToFacebookTab(message);
@@ -320,7 +357,7 @@ chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onStartup.addListener(connect);
 connect();
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "get_status") {
     heartbeatToLocal().then(() => {
       connect();
@@ -333,7 +370,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "command_ack") {
-    postAck({ ...message, clientId }).then(() => sendResponse({ ok: true }));
+    postAck({ ...message, clientId, tabId: sender.tab?.id || message.tabId, url: sender.tab?.url || message.url }).then(() => sendResponse({ ok: true }));
     return true;
   }
   if (message.type === "collect_current_tab") {

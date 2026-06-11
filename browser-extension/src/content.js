@@ -2,6 +2,7 @@ let collecting = true;
 let autoScrollStopped = false;
 let monitorTimer = null;
 let latestSettings = null;
+let collectTimer = null;
 const seenKeys = new Set();
 
 const noiseTexts = new Set([
@@ -271,6 +272,24 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
   return fresh;
 }
 
+function startCollectLoop() {
+  collecting = true;
+  if (collectTimer) clearInterval(collectTimer);
+  collectVisiblePosts();
+  collectTimer = setInterval(() => collectVisiblePosts(), 4000);
+}
+
+function pauseCollectLoop() {
+  collecting = false;
+  if (collectTimer) clearInterval(collectTimer);
+  collectTimer = null;
+}
+
+function stopCollectLoop() {
+  pauseCollectLoop();
+  autoScrollStopped = true;
+}
+
 function scrollCandidates() {
   const centerElement = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2));
   const ancestors = [];
@@ -339,6 +358,19 @@ async function humanScrollBy(target, distance) {
   }
 }
 
+function forceDomScroll(target, distance) {
+  const before = scrollTopOf(target);
+  if (target === document.body || target === document.documentElement || target === document.scrollingElement) {
+    const root = document.scrollingElement || document.documentElement || document.body;
+    root.scrollTop = before + distance;
+    document.documentElement.scrollTop = before + distance;
+    document.body.scrollTop = before + distance;
+  } else {
+    target.scrollTop = before + distance;
+  }
+  return { before, after: scrollTopOf(target) };
+}
+
 async function tryScrollOnce(preferredDistance) {
   const distance = Math.floor(preferredDistance || (600 + Math.random() * 600));
   const attempts = [];
@@ -346,9 +378,17 @@ async function tryScrollOnce(preferredDistance) {
   for (const target of scrollCandidates()) {
     const before = scrollTopOf(target);
 
+    const forced = forceDomScroll(target, distance);
+    await wait(180);
+    let after = scrollTopOf(target);
+    attempts.push({ method: "force-dom-scrollTop", container: target.tagName || "document", beforeScrollTop: forced.before, afterScrollTop: after });
+    if (Math.abs(after - forced.before) > 8) {
+      return { ok: true, distance, beforeScrollTop: forced.before, afterScrollTop: after, method: "force-dom-scrollTop", container: target.tagName || "document", attempts };
+    }
+
     await humanScrollBy(target, distance);
     await wait(260);
-    let after = scrollTopOf(target);
+    after = scrollTopOf(target);
     attempts.push({ method: "human-scrollBy", container: target.tagName || "document", beforeScrollTop: before, afterScrollTop: after });
     if (Math.abs(after - before) > 8) {
       return { ok: true, distance, beforeScrollTop: before, afterScrollTop: after, method: "human-scrollBy", container: target.tagName || "document", attempts };
@@ -389,6 +429,7 @@ function sendAck(commandId, commandType, success, message, currentState, details
     message,
     currentState,
     pluginState: currentState,
+    url: location.href,
     details
   });
 }
@@ -486,9 +527,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "collect_now" || message.type === "start_collecting") {
-    collecting = true;
+    startCollectLoop();
     const posts = collectVisiblePosts();
-    sendResponse({ ok: true, message: `采集已启动，当前正在监听 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" });
+    sendResponse({ ok: true, message: `采集已启动，后台正在监听此 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" });
     return true;
   }
   if (message.type === "clear_posts") {
@@ -497,14 +538,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === "stop_collecting") {
-    collecting = false;
-    autoScrollStopped = true;
+    stopCollectLoop();
     sendResponse({ ok: true, message: "采集已停止", currentState: "stopped" });
     return true;
   }
   if (message.type === "pause_collecting") {
-    collecting = false;
-    autoScrollStopped = true;
+    pauseCollectLoop();
     sendResponse({ ok: true, message: "采集已暂停", currentState: "paused" });
     return true;
   }
