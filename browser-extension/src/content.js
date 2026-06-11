@@ -1,3 +1,16 @@
+const LOCAL_HEARTBEAT = "http://127.0.0.1:8765/client-heartbeat";
+const LOCAL_POSTS = "http://127.0.0.1:8765/posts";
+const LOCAL_ACK = "http://127.0.0.1:8765/command-ack";
+const contentClientId = `content-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+if (globalThis.__FORADAR_CONTENT_STOP__) {
+  try {
+    globalThis.__FORADAR_CONTENT_STOP__();
+  } catch {
+    // Ignore stale cleanup errors.
+  }
+}
+
 let collecting = false;
 let autoScrollStopped = false;
 let monitorTimer = null;
@@ -5,6 +18,7 @@ let latestSettings = null;
 let collectTimer = null;
 let contextActive = true;
 let feedObserver = null;
+let desktopPollTimer = null;
 const seenKeys = new Set();
 
 function stopAllLocalWork() {
@@ -13,9 +27,26 @@ function stopAllLocalWork() {
   autoScrollStopped = true;
   if (collectTimer) clearInterval(collectTimer);
   if (monitorTimer) clearInterval(monitorTimer);
+  if (desktopPollTimer) clearInterval(desktopPollTimer);
   collectTimer = null;
   monitorTimer = null;
+  desktopPollTimer = null;
   if (feedObserver) feedObserver.disconnect();
+}
+
+globalThis.__FORADAR_CONTENT_STOP__ = stopAllLocalWork;
+
+async function postJson(url, body) {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    return response.ok ? await response.json().catch(() => ({ ok: true })) : { ok: false, error: `HTTP ${response.status}` };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
 }
 
 function isExtensionContextValid() {
@@ -289,7 +320,8 @@ function shouldKeepPost(post) {
 }
 
 function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {}) {
-  safeSendMessage({
+  postJson(LOCAL_ACK, {
+    clientId: contentClientId,
     type: "command_ack",
     commandId: `scan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     commandType: "scan_result",
@@ -298,7 +330,8 @@ function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {
     message: `本次扫描：发现 ${scannedCount} 条帖子，关键词匹配 ${matchedCount} 条，忽略 ${ignoredCount} 条`,
     currentState: collecting ? "collecting" : "paused",
     pluginState: collecting ? "collecting" : "paused",
-    details: { scannedCount, matchedCount, ignoredCount, source, ...extra }
+    timestamp: new Date().toISOString(),
+    details: { scannedCount, matchedCount, ignoredCount, source, url: location.href, ...extra }
   });
 }
 
@@ -325,7 +358,7 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
     return true;
   });
   sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { ignoredReasons, sentCount: fresh.length });
-  if (fresh.length > 0) safeSendMessage({ type: "posts_batch_collected", payload: fresh });
+  if (fresh.length > 0) postJson(LOCAL_POSTS, { clientId: contentClientId, posts: fresh });
   return fresh;
 }
 
@@ -477,7 +510,8 @@ async function tryScrollOnce(preferredDistance) {
 }
 
 function sendAck(commandId, commandType, success, message, currentState, details = {}) {
-  safeSendMessage({
+  postJson(LOCAL_ACK, {
+    clientId: contentClientId,
     type: "command_ack",
     commandId,
     commandType,
@@ -486,6 +520,7 @@ function sendAck(commandId, commandType, success, message, currentState, details
     message,
     currentState,
     pluginState: currentState,
+    timestamp: new Date().toISOString(),
     url: location.href,
     details
   });
@@ -573,80 +608,85 @@ async function diagnose(commandId) {
   );
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+async function runDesktopCommand(message) {
+  if (!message || !message.type) return { ok: false, message: "空命令", currentState: "error" };
   if (message.type === "settings_updated") {
     latestSettings = message.payload;
-    sendResponse({ ok: true, message: "关键词和配置已同步到 content script", currentState: collecting ? "collecting" : "paused" });
-    return true;
+    return { ok: true, message: "关键词和配置已同步到 content script", currentState: collecting ? "collecting" : "paused" };
   }
-  if (message.type === "ping_content") {
-    sendResponse({ ok: true, url: location.href });
-    return true;
-  }
-  if (message.type === "collect_now" || message.type === "start_collecting") {
+  if (message.type === "ping_content") return { ok: true, url: location.href, currentState: collecting ? "collecting" : "stopped" };
+  if (message.type === "collect_now" || message.type === "collect_once" || message.type === "start_collecting") {
     startCollectLoop();
     const posts = collectVisiblePosts();
-    sendResponse({ ok: true, message: `采集已启动，后台正在监听此 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" });
-    return true;
+    return { ok: true, message: `采集已启动，后台正在监听此 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" };
   }
   if (message.type === "clear_posts") {
     seenKeys.clear();
-    sendResponse({ ok: true, message: "插件采集缓存已清空", currentState: collecting ? "collecting" : "stopped" });
-    return true;
+    return { ok: true, message: "插件采集缓存已清空", currentState: collecting ? "collecting" : "stopped" };
   }
   if (message.type === "stop_collecting") {
     stopCollectLoop();
-    sendResponse({ ok: true, message: "采集已停止", currentState: "stopped" });
-    return true;
+    return { ok: true, message: "采集已停止", currentState: "stopped" };
   }
   if (message.type === "pause_collecting") {
     pauseCollectLoop();
-    sendResponse({ ok: true, message: "采集已暂停", currentState: "paused" });
-    return true;
+    return { ok: true, message: "采集已暂停", currentState: "paused" };
   }
   if (message.type === "start_auto_scroll") {
     const total = Math.max(1, Number(message.payload?.count || 5));
     const delayMs = Math.max(1000, Number(message.payload?.delayMs || 3000));
     startAutoScroll(message.commandId || `content-${Date.now()}`, total, delayMs);
-    sendResponse({ ok: true, message: "自动滚动已启动", currentState: "auto_scrolling" });
-    return true;
+    return { ok: true, message: "自动滚动已启动", currentState: "auto_scrolling" };
   }
   if (message.type === "stop_auto_scroll") {
     autoScrollStopped = true;
-    sendResponse({ ok: true, message: "自动滚动已停止", currentState: collecting ? "collecting" : "paused" });
-    return true;
+    return { ok: true, message: "自动滚动已停止", currentState: collecting ? "collecting" : "paused" };
   }
-  if (message.type === "test_scroll_once") {
-    tryScrollOnce().then((result) => {
-      const posts = result.ok ? collectVisiblePosts() : [];
-      sendResponse({
-        ...result,
-        message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 个新帖子` : result.error,
-        currentState: result.ok ? "collecting" : "error",
-        collectedCount: posts.length
-      });
-    });
-    return true;
+  if (message.type === "test_scroll_once" || message.type === "scroll_once") {
+    const result = await tryScrollOnce();
+    const posts = result.ok ? collectVisiblePosts() : [];
+    return { ...result, message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 个新帖子` : result.error, currentState: result.ok ? "collecting" : "error", collectedCount: posts.length };
   }
   if (message.type === "diagnose") {
     diagnose(message.commandId || `diag-${Date.now()}`);
-    sendResponse({ ok: true, message: "诊断已启动", currentState: "collecting" });
-    return true;
+    return { ok: true, message: "诊断已启动", currentState: "collecting" };
   }
   if (message.type === "start_group_monitor" || message.type === "start_monitoring") {
     startGroupMonitor(message.commandId || `monitor-${Date.now()}`, Number(message.payload?.intervalSeconds || 60));
-    sendResponse({ ok: true, message: "群组监控已启动", currentState: "monitoring" });
-    return true;
+    return { ok: true, message: "群组监控已启动", currentState: "monitoring" };
   }
   if (message.type === "stop_group_monitor" || message.type === "stop_monitoring") {
     if (monitorTimer) clearInterval(monitorTimer);
     monitorTimer = null;
-    sendResponse({ ok: true, message: "群组监控已停止", currentState: "stopped" });
-    return true;
+    return { ok: true, message: "群组监控已停止", currentState: "stopped" };
   }
-  sendResponse({ ok: false, message: `content script 未实现命令：${message.type}`, currentState: "error" });
+  return { ok: false, message: `content script 未实现命令：${message.type}`, currentState: "error" };
+}
+
+async function pollDesktopCommands() {
+  if (!contextActive) return;
+  const data = await postJson(LOCAL_HEARTBEAT, {
+    clientId: contentClientId,
+    tabUrl: location.href,
+    userAgent: navigator.userAgent
+  });
+  if (data?.settings) latestSettings = data.settings;
+  if (Array.isArray(data?.commands)) {
+    for (const command of data.commands) {
+      const response = await runDesktopCommand(command);
+      if (command.commandId) {
+        sendAck(command.commandId, command.type, response.ok !== false, response.message || "命令已执行", response.currentState || (response.ok === false ? "error" : "collecting"), { ...response, url: location.href });
+      }
+    }
+  }
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  runDesktopCommand(message).then(sendResponse);
   return true;
 });
 
 // Collection is intentionally command-driven. The desktop app or popup must send
 // start_collecting/collect_now before this script scans the page.
+pollDesktopCommands();
+desktopPollTimer = setInterval(pollDesktopCommands, 3000);
