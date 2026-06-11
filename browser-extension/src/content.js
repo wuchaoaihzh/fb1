@@ -372,12 +372,128 @@ function secondTopSectionRow(container) {
   return rows[1] || rows[0] || null;
 }
 
+function currentPhotoIdentifiers(url = window.location.href) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    const photoId = parsed.searchParams.get("fbid") || "";
+    const setValue = parsed.searchParams.get("set") || "";
+    const postId = (setValue.match(/(?:^|[.:])(pcb|story_fbid)\.(\d+)/i)?.[2]) || parsed.searchParams.get("story_fbid") || "";
+    return { photoId, postId };
+  } catch {
+    return { photoId: "", postId: "" };
+  }
+}
+
+function extractPostIdFromUrl(url = "") {
+  const normalized = normalizeUrl(url);
+  if (!normalized) return "";
+  return normalized.match(/\/(?:posts|permalink)\/(\d+)/i)?.[1]
+    || normalized.match(/[?&](?:story_fbid|multi_permalinks)=(\d+)/i)?.[1]
+    || "";
+}
+
 function parseJsonScriptText(text) {
   try {
     return JSON.parse(text);
   } catch {
     return null;
   }
+}
+
+function decodeFacebookEscapes(value = "") {
+  return String(value || "")
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\\//g, "/")
+    .replace(/\\"/g, "\"")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "")
+    .replace(/\\t/g, "\t")
+    .replace(/\\\\/g, "\\")
+    .trim();
+}
+
+function nearestRegexMatch(text, pattern, anchorIndex) {
+  const source = String(text || "");
+  const regex = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+  let best = null;
+  for (let match = regex.exec(source); match; match = regex.exec(source)) {
+    const distance = Math.abs(match.index - anchorIndex);
+    if (!best || distance < best.distance) best = { match, distance };
+    if (match.index === regex.lastIndex) regex.lastIndex += 1;
+  }
+  return best?.match || null;
+}
+
+function findPhotoStoryFromRawScriptText(text, identifiers) {
+  const { photoId = "", postId = "" } = identifiers || {};
+  if (!text || (!photoId && !postId)) return null;
+
+  const markers = [
+    postId ? `permalink\\/${postId}` : "",
+    postId ? `post_id":"${postId}"` : "",
+    postId ? `post_id\\":\\"${postId}\\"` : "",
+    postId ? `story_fbid":["${postId}"]` : "",
+    postId ? `story_fbid\\":[\\"${postId}\\"]` : "",
+    postId ? `mediasetToken":"pcb.${postId}"` : "",
+    photoId ? `"nodeID":"${photoId}"` : "",
+    photoId ? `"id":"${photoId}"` : "",
+    photoId ? `fbid=${photoId}` : ""
+  ].filter(Boolean);
+
+  const segments = [];
+  for (const marker of markers) {
+    let index = text.indexOf(marker);
+    while (index !== -1) {
+      const start = Math.max(0, index - 7000);
+      const end = Math.min(text.length, index + 14000);
+      segments.push(text.slice(start, end));
+      if (segments.length >= 12) break;
+      index = text.indexOf(marker, index + marker.length);
+    }
+    if (segments.length >= 12) break;
+  }
+
+  const uniqueSegments = [...new Set(segments)];
+  const candidates = uniqueSegments.map((segment) => {
+    const decoded = decodeFacebookEscapes(segment);
+    const anchorIndex = Math.max(
+      postId ? segment.indexOf(postId) : -1,
+      photoId ? segment.indexOf(photoId) : -1,
+      0
+    );
+    const publishMatch = nearestRegexMatch(segment, /publish_time\\?":(\d{10,13})/g, anchorIndex);
+    const creationMatch = nearestRegexMatch(segment, /creation_time\\?":(\d{10,13})/g, anchorIndex);
+    const authorMatch = nearestRegexMatch(
+      decoded,
+      /"actors"?\s*:\s*\[\{[\s\S]{0,400}?(?:^|[,{])"name"\s*:\s*"([^"]{1,120})"/g,
+      Math.max(postId ? decoded.indexOf(postId) : -1, photoId ? decoded.indexOf(photoId) : -1, 0)
+    );
+    const messageMatch = nearestRegexMatch(
+      decoded,
+      /message"?\s*:\s*\{[\s\S]{0,1200}?text"?\s*:\s*"([\s\S]{1,1500}?)"\s*[,}]/g,
+      Math.max(postId ? decoded.indexOf(postId) : -1, photoId ? decoded.indexOf(photoId) : -1, 0)
+    );
+    const urlMatches = [...decoded.matchAll(/https?:\/\/www\.facebook\.com\/groups\/[^\s"'<>]+/g)].map((match) => match[0]);
+    const matchedPostUrl = urlMatches.find((url) => !postId || extractPostIdFromUrl(url) === postId) || urlMatches[0] || "";
+    const matchedPostId = postId || extractPostIdFromUrl(matchedPostUrl);
+    const rawTimestamp = publishMatch?.[1] ? Number(publishMatch[1]) * 1000 : creationMatch?.[1] ? Number(creationMatch[1]) * 1000 : 0;
+
+    if (!rawTimestamp) return null;
+    return {
+      authorName: decodeFacebookEscapes(authorMatch?.[1] || ""),
+      postUrl: matchedPostUrl,
+      rawTimestamp,
+      timestampKind: publishMatch?.[1] ? "publish_time" : "creation_time",
+      postText: decodeFacebookEscapes(messageMatch?.[1] || ""),
+      matchedPostId
+    };
+  }).filter(Boolean);
+
+  return candidates.sort((a, b) => {
+    const scoreA = (a.timestampKind === "publish_time" ? 100 : 0) + (a.matchedPostId && postId && a.matchedPostId === postId ? 50 : 0);
+    const scoreB = (b.timestampKind === "publish_time" ? 100 : 0) + (b.matchedPostId && postId && b.matchedPostId === postId ? 50 : 0);
+    return scoreB - scoreA || b.rawTimestamp - a.rawTimestamp;
+  })[0] || null;
 }
 
 function walkForPhotoStoryFallback(node, result = []) {
@@ -429,28 +545,44 @@ function formatPhotoFallbackTime(timestampMs) {
   if (!timestampMs || !Number.isFinite(timestampMs)) return "";
   const date = new Date(timestampMs);
   if (Number.isNaN(date.getTime())) return "";
-  const month = date.toLocaleString("en-US", { month: "long" });
-  return `${date.getDate()} ${month} at ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()} ${String(date.getHours()).padStart(2, "0")}.${String(date.getMinutes()).padStart(2, "0")}.${String(date.getSeconds()).padStart(2, "0")}`;
 }
 
 function findPhotoStoryFallback() {
   if (!isFacebookPhotoPage()) return null;
+  const { photoId, postId } = currentPhotoIdentifiers();
   const candidates = [];
   for (const script of document.querySelectorAll("script[type='application/json'], script")) {
     const text = script.textContent || "";
-    if (!text || (!text.includes("Barmaksiz") && !text.includes("CometPhotoRootContentQuery") && !text.includes("publish_time") && !text.includes("creation_time"))) continue;
+    if (!text) continue;
+    const mayContainCurrentPhoto = Boolean(photoId && text.includes(photoId));
+    const mayContainCurrentPost = Boolean(postId && text.includes(postId));
+    const hasPhotoMarkers = text.includes("CometPhotoRootContentQuery") || text.includes("shareable_from_perspective_of_feed_ufi");
+    const hasTimeMarkers = text.includes("publish_time") || text.includes("creation_time");
+    if (!mayContainCurrentPhoto && !mayContainCurrentPost && !hasPhotoMarkers && !hasTimeMarkers) continue;
+    const textFallback = findPhotoStoryFromRawScriptText(text, { photoId, postId });
+    if (textFallback) candidates.push(textFallback);
     const parsed = parseJsonScriptText(text);
     if (!parsed) continue;
     walkForPhotoStoryFallback(parsed, candidates);
   }
-  const filtered = candidates
-    .filter((item) => item?.authorName && item?.postUrl && item?.rawTimestamp)
-    .sort((a, b) => {
-      const kindScoreA = a.timestampKind === "publish_time" ? 1 : 0;
-      const kindScoreB = b.timestampKind === "publish_time" ? 1 : 0;
-      return kindScoreB - kindScoreA || b.rawTimestamp - a.rawTimestamp;
-    });
-  return filtered[0] || null;
+  const filtered = candidates.filter((item) => item?.authorName && item?.postUrl && item?.rawTimestamp);
+  const exactPostMatches = postId
+    ? filtered.filter((item) => extractPostIdFromUrl(item.postUrl) === postId)
+    : [];
+  const scoped = exactPostMatches.length > 0 ? exactPostMatches : filtered;
+  const ranked = scoped
+    .map((item) => {
+      const itemPostId = extractPostIdFromUrl(item.postUrl);
+      let score = 0;
+      if (item.timestampKind === "publish_time") score += 100;
+      if (postId && itemPostId === postId) score += 80;
+      if (item.postUrl.includes("/permalink/")) score += 12;
+      if (photoId && item.postUrl.includes(photoId)) score += 8;
+      return { ...item, score };
+    })
+    .sort((a, b) => b.score - a.score || b.rawTimestamp - a.rawTimestamp);
+  return ranked[0] || null;
 }
 
 function findSourceLink(container) {
@@ -555,6 +687,8 @@ function extractTimeFragment(value) {
   }
   const weekdayMatch = text.match(/(?:Today|Yesterday|Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Tues(?:day)?|Wed(?:nesday)?|Thu(?:rsday)?|Thur(?:sday)?|Fri(?:day)?|Sat(?:urday)?|今天|昨天|周[一二三四五六日天]|星期[一二三四五六日天])(?:\s+(?:at\s+)?)?(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?::\d{2})?\s*(?:[AP]M)?/i);
   if (weekdayMatch?.[0]) return weekdayMatch[0].trim();
+  const dayMonthMatch = text.match(/\b\d{1,2}\s+(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December)(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?\b/i);
+  if (dayMonthMatch?.[0]) return dayMonthMatch[0].trim();
   const absoluteMatch = text.match(/\b(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December)\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?\b/i);
   if (absoluteMatch?.[0]) return absoluteMatch[0].trim();
   const chineseAbsoluteMatch = text.match(/(?:\d{4}年\s*)?\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?:[:：]\d{2})?)?/);
