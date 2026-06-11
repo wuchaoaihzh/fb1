@@ -34,15 +34,27 @@ const clients = new Map<WebSocket, ExtensionClientInfo>();
 const httpClients = new Map<string, ExtensionClientInfo & { lastSeenAt: number }>();
 const commandQueues = new Map<string, BridgeMessage[]>();
 type OperationLevel = "info" | "success" | "warning" | "error";
+type CommandResult = {
+  commandId: string;
+  sent: boolean;
+  ack?: boolean;
+  success?: boolean;
+  message?: string;
+};
 
 const operationLog: Array<{ at: string; message: string; level: OperationLevel }> = [];
-const pendingCommands = new Map<string, { type: string; createdAt: number }>();
+const pendingCommands = new Map<string, {
+  type: string;
+  createdAt: number;
+  resolve: (result: CommandResult) => void;
+  timeout: NodeJS.Timeout;
+}>();
 const handledAckKeys = new Set<string>();
 const rendererSockets = new Set<WebSocket>();
 let nativeServer: http.Server | null = null;
 
 function operationLogFile(): string {
-  return path.join(dataDir(), "logs", "operation.log");
+  return path.join(logDir(), "operation.log");
 }
 
 function addOperation(message: string, level: OperationLevel = "info"): void {
@@ -86,7 +98,31 @@ function commandId(): string {
 function dataDir(): string {
   const dir = path.join(app.getPath("userData"), "data");
   fs.mkdirSync(dir, { recursive: true });
-  ["exports", "logs", "config", "groups", "history", "cache"].forEach((name) => fs.mkdirSync(path.join(dir, name), { recursive: true }));
+  [logDir(), exportDir(), configDir(), cacheDir()].forEach((name) => fs.mkdirSync(name, { recursive: true }));
+  return dir;
+}
+
+function logDir(): string {
+  const dir = path.join(app.getPath("userData"), "logs");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function exportDir(): string {
+  const dir = path.join(app.getPath("userData"), "exports");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function configDir(): string {
+  const dir = path.join(app.getPath("userData"), "config");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function cacheDir(): string {
+  const dir = path.join(app.getPath("userData"), "cache");
+  fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
@@ -100,11 +136,11 @@ function log(message: string, details?: unknown): void {
 }
 
 function settingsFile(): string {
-  return path.join(dataDir(), "config", "settings.json");
+  return path.join(configDir(), "settings.json");
 }
 
 function postsFile(): string {
-  return path.join(dataDir(), "history", "posts.json");
+  return path.join(dataDir(), "posts.json");
 }
 
 function firstExistingFile(paths: string[]): string | undefined {
@@ -113,7 +149,7 @@ function firstExistingFile(paths: string[]): string | undefined {
 
 function loadPersistedData(): void {
   try {
-    const savedSettingsFile = firstExistingFile([settingsFile(), path.join(dataDir(), "settings.json")]);
+    const savedSettingsFile = firstExistingFile([settingsFile(), path.join(dataDir(), "config", "settings.json"), path.join(dataDir(), "settings.json")]);
     if (savedSettingsFile) {
       const saved = JSON.parse(fs.readFileSync(savedSettingsFile, "utf8")) as Partial<RadarSettings>;
       settings = {
@@ -125,7 +161,7 @@ function loadPersistedData(): void {
         translation: { ...defaultSettings.translation, ...saved.translation }
       };
     }
-    const savedPostsFile = firstExistingFile([postsFile(), path.join(dataDir(), "posts.json")]);
+    const savedPostsFile = firstExistingFile([postsFile(), path.join(dataDir(), "history", "posts.json")]);
     if (savedPostsFile) {
       const saved = JSON.parse(fs.readFileSync(savedPostsFile, "utf8")) as RadarPost[];
       saved.forEach((post) => posts.set(dedupeKey(post), post));
@@ -212,7 +248,18 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
   if (handledAckKeys.has(ackKey)) return;
   handledAckKeys.add(ackKey);
   setTimeout(() => handledAckKeys.delete(ackKey), 60000);
-  pendingCommands.delete(message.commandId);
+  const pending = pendingCommands.get(message.commandId);
+  if (pending) {
+    clearTimeout(pending.timeout);
+    pendingCommands.delete(message.commandId);
+    pending.resolve({
+      commandId: message.commandId,
+      sent: true,
+      ack: true,
+      success: message.success,
+      message: message.message
+    });
+  }
   collectionState = message.pluginState || message.currentState || "error";
   const detailText = message.details ? `；详情：${JSON.stringify(message.details)}` : "";
   const locationText = message.url ? `；页面：${message.url}` : "";
@@ -221,7 +268,7 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
   broadcastState();
 }
 
-function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandId: string; sent: boolean } {
+function sendCommand(type: BridgeMessage["type"], payload?: unknown): Promise<CommandResult> {
   const id = commandId();
   const connectedCount = stats().connectedClients;
   if (connectedCount === 0) {
@@ -229,22 +276,24 @@ function sendCommand(type: BridgeMessage["type"], payload?: unknown): { commandI
     addOperation(`命令发送失败：${type}；未检测到已连接插件`, "error");
     addOperation("插件未连接，请确认浏览器插件已安装，并打开 Facebook 页面", "warning");
     broadcastState();
-    return { commandId: id, sent: false };
+    return Promise.resolve({ commandId: id, sent: false, ack: false, success: false, message: "插件未连接，请确认浏览器插件已安装，并打开 Facebook 页面" });
   }
   const message = payload === undefined ? ({ type, commandId: id } as BridgeMessage) : ({ type, commandId: id, payload } as BridgeMessage);
-  pendingCommands.set(id, { type, createdAt: Date.now() });
   addOperation(`桌面端发送命令：${type}；commandId=${id}`, "info");
   broadcastToExtensions(message);
-  setTimeout(() => {
-    if (pendingCommands.has(id)) {
-      pendingCommands.delete(id);
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      if (pendingCommands.has(id)) {
+        pendingCommands.delete(id);
+      }
       collectionState = "error";
       addOperation(`${type} 未收到插件 ACK 确认；commandId=${id}`, "error");
       addOperation("插件已断开或当前没有可采集的 Facebook 页面，请刷新 Facebook 页面或重新打开插件", "warning");
       broadcastState();
-    }
-  }, 12000);
-  return { commandId: id, sent: true };
+      resolve({ commandId: id, sent: true, ack: false, success: false, message: `${type} 未收到插件 ACK 确认` });
+    }, 12000);
+    pendingCommands.set(id, { type, createdAt: Date.now(), resolve, timeout });
+  });
 }
 
 function assertWritableDir(dir: string): boolean {
@@ -367,7 +416,7 @@ function exportRows() {
 
 function timestampName(ext: string): string {
   const stamp = formatLocalDateTime(new Date()).replace(/:/g, "-").replace(" ", "_");
-  return path.join(dataDir(), "exports", `facebook_posts_${stamp}.${ext}`);
+  return path.join(exportDir(), `facebook_posts_${stamp}.${ext}`);
 }
 
 async function exportCsv(): Promise<string> {
@@ -504,6 +553,13 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     posts.clear();
     persistPosts();
     addOperation(`数据已清空，共清空 ${count} 条帖子`, "success");
+    if (stats().connectedClients > 0) {
+      void sendCommand("clear_posts").then((result) => {
+        if (!result.success) addOperation(`插件缓存清空失败：${result.message || "未收到确认"}`, "warning");
+      });
+    }
+    broadcastState();
+    return { ok: true, clearedCount: count };
   }
   if (command === "mark-handled" && typeof payload === "string") {
     const post = [...posts.values()].find((item) => item.postId === payload);
@@ -543,11 +599,13 @@ ipcMain.handle("command", async (_event, command: string, payload?: unknown) => 
     const result = await shell.openPath(dataDir());
     if (result) addOperation(`打开数据目录失败：${result}`, "error");
     else addOperation(`已打开数据目录：${dataDir()}`, "success");
+    return { ok: !result, path: dataDir(), message: result || "已打开数据目录" };
   }
   if (command === "open-log-folder") {
-    const result = await shell.openPath(path.dirname(operationLogFile()));
+    const result = await shell.openPath(logDir());
     if (result) addOperation(`打开日志文件夹失败：${result}`, "error");
-    else addOperation(`已打开日志文件夹：${path.dirname(operationLogFile())}`, "success");
+    else addOperation(`已打开日志文件夹：${logDir()}`, "success");
+    return { ok: !result, path: logDir(), message: result || "已打开日志文件夹" };
   }
   if (command === "clear-logs") {
     operationLog.splice(0);

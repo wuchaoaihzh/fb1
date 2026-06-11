@@ -116,6 +116,7 @@ export type BridgeMessage =
   | { type: "scroll_once"; commandId?: string }
   | { type: "get_plugin_state"; commandId?: string }
   | { type: "get_active_facebook_tabs"; commandId?: string }
+  | { type: "clear_posts"; commandId?: string }
   | { type: "start_auto_scroll"; commandId?: string; payload: { count: number; delayMs?: number } }
   | { type: "stop_auto_scroll"; commandId?: string }
   | { type: "test_collect_once"; commandId?: string }

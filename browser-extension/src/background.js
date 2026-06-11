@@ -130,6 +130,7 @@ function defaultSuccessMessage(commandType) {
     scroll_once: "测试滚动成功",
     get_plugin_state: "插件状态已返回",
     get_active_facebook_tabs: "Facebook 页面列表已返回",
+    clear_posts: "插件采集缓存已清空",
     start_auto_scroll: "自动滚动已启动，正在控制 Facebook 页面滚动",
     stop_auto_scroll: "自动滚动已停止",
     diagnose: "连接诊断完成",
@@ -172,6 +173,9 @@ async function runExtensionCommand(message) {
     } else if (commandType === "scroll_once") {
       result = await sendToFacebookTab({ ...message, type: "test_scroll_once" });
       nextState = result.ok === false ? "error" : extensionState === "stopped" ? "collecting" : extensionState;
+    } else if (commandType === "clear_posts") {
+      result = await sendToFacebookTab(message);
+      nextState = result.ok === false ? "error" : extensionState;
     } else if (commandType === "start_collecting") {
       result = await sendToFacebookTab(message);
       nextState = result.ok === false ? "error" : "collecting";

@@ -467,6 +467,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, message: `采集已启动，当前正在监听 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" });
     return true;
   }
+  if (message.type === "clear_posts") {
+    seenKeys.clear();
+    sendResponse({ ok: true, message: "插件采集缓存已清空", currentState: collecting ? "collecting" : "stopped" });
+    return true;
+  }
   if (message.type === "stop_collecting") {
     collecting = false;
     autoScrollStopped = true;

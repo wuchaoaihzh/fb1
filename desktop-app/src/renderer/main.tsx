@@ -159,8 +159,12 @@ function App() {
 
   const command = async (name: string, payload?: unknown, feedback?: string) => {
     if (feedback) notify(feedback);
-    const result = await window.radarApi?.command(name, payload) as { sent?: boolean } | undefined;
-    if (result?.sent === false) notify("命令发送失败，请查看运行日志");
+    const result = await window.radarApi?.command(name, payload) as { sent?: boolean; ack?: boolean; success?: boolean; message?: string; ok?: boolean } | undefined;
+    if (result?.message) {
+      notify(result.success === false || result.ok === false ? `操作失败：${result.message}` : result.message);
+    } else if (result?.sent === false) {
+      notify("命令发送失败，请查看运行日志");
+    }
     return result;
   };
 
@@ -254,6 +258,7 @@ function App() {
       await command("ui-log", "清空数据已取消");
       return;
     }
+    setSelectedPost(null);
     await command("clear", undefined, "正在清空数据");
   };
 
