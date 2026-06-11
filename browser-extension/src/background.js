@@ -184,9 +184,6 @@ async function heartbeatToLocal() {
     if (!response.ok) throw new Error(`Heartbeat failed: ${response.status}`);
     const data = await response.json();
     if (data.settings) latestSettings = data.settings;
-    if (Array.isArray(data.commands)) {
-      data.commands.forEach((command) => runExtensionCommand(command));
-    }
     setConnected(true);
     return true;
   } catch {
