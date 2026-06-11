@@ -41,8 +41,20 @@ function isFacebookHomeUrl(url) {
   }
 }
 
+function isFacebookPhotoUrl(url) {
+  try {
+    const parsed = new URL(url || "");
+    if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) return false;
+    if (!/^\/photo(?:\/|\.php|$)/i.test(parsed.pathname)) return false;
+    const setValue = parsed.searchParams.get("set") || "";
+    return parsed.searchParams.has("fbid") || /(^|[.:])pcb(?:[.:]|$)/i.test(setValue);
+  } catch {
+    return false;
+  }
+}
+
 function isCollectibleFacebookUrl(url) {
-  return isFacebookHomeUrl(url) || isFacebookGroupUrl(url);
+  return isFacebookHomeUrl(url) || isFacebookGroupUrl(url) || isFacebookPhotoUrl(url);
 }
 
 async function listFacebookTabs() {

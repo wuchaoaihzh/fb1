@@ -258,8 +258,20 @@ function isFacebookGroupPage(url = window.location.href) {
   }
 }
 
+function isFacebookPhotoPage(url = window.location.href) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) return false;
+    if (!/^\/photo(?:\/|\.php|$)/i.test(parsed.pathname)) return false;
+    const setValue = parsed.searchParams.get("set") || "";
+    return parsed.searchParams.has("fbid") || /(^|[.:])pcb(?:[.:]|$)/i.test(setValue);
+  } catch {
+    return false;
+  }
+}
+
 function isSupportedCollectionPage(url = window.location.href) {
-  return isFacebookHomePage(url) || isFacebookGroupPage(url);
+  return isFacebookHomePage(url) || isFacebookGroupPage(url) || isFacebookPhotoPage(url);
 }
 
 function findGroupName() {
@@ -274,6 +286,112 @@ function findGroupUrl() {
   if (/\/groups\/feed\/?$/i.test(location.pathname)) return normalizeUrl(window.location.href);
   const groupLink = [...document.querySelectorAll("a[href*='/groups/']")].find((anchor) => /\/groups\/[^/?#]+/.test(anchor.href));
   return groupLink ? normalizeUrl(groupLink.href) : normalizeUrl(window.location.href);
+}
+
+function isCanonicalPostHref(href = "") {
+  return href.includes("/posts/") || href.includes("/permalink/") || href.includes("story_fbid=");
+}
+
+function isPhotoShellHref(href = "") {
+  return href.includes("/photo/") || href.includes("fbid=") || href.includes("set=pcb");
+}
+
+function isProfileLikeHref(href = "") {
+  if (!href || !/^https:\/\/(?:www\.)?facebook\.com\//i.test(href)) return false;
+  return !(
+    href.includes("/groups/") ||
+    href.includes("/posts/") ||
+    href.includes("/permalink/") ||
+    href.includes("/photo/") ||
+    href.includes("story_fbid=") ||
+    href.includes("fbid=") ||
+    href.includes("set=pcb") ||
+    href.includes("comment_id=") ||
+    href.includes("/watch") ||
+    href.includes("/marketplace")
+  );
+}
+
+function isViewPostText(text = "") {
+  return /^(view post|see post|open post|查看帖子|打开帖子)$/i.test(String(text || "").trim());
+}
+
+function findPreferredPostAnchor(container) {
+  const anchors = [...container.querySelectorAll("a[href]")].filter((anchor) => isVisibleElement(anchor));
+  const ranked = anchors
+    .map((anchor) => {
+      const href = normalizeUrl(anchor.href || "");
+      const text = visibleText(anchor);
+      let score = 0;
+      if (isCanonicalPostHref(href)) score += 100;
+      else if (isPhotoShellHref(href)) score += 25;
+      if (isViewPostText(text)) score += 30;
+      if (isInTopSection(container, anchor)) score += 8;
+      return { anchor, href, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.anchor.getBoundingClientRect().top - b.anchor.getBoundingClientRect().top);
+  return ranked[0]?.anchor || null;
+}
+
+function findPhotoPostContext(container) {
+  if (!isFacebookPhotoPage()) return container;
+  const postAnchor = findPreferredPostAnchor(container);
+  if (!postAnchor || !isCanonicalPostHref(postAnchor.href || "")) return container;
+
+  let current = postAnchor.parentElement;
+  let best = container;
+  let depth = 0;
+  while (current && depth < 10) {
+    if (isVisibleElement(current)) {
+      const text = visibleText(current);
+      if (text.length >= 20) best = current;
+      const hasTime = [...current.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
+        .some((element) => extractTimeFragment(
+          element.getAttribute("aria-label") ||
+          element.getAttribute("title") ||
+          element.getAttribute("datetime") ||
+          element.getAttribute("data-utime") ||
+          visibleText(element)
+        ));
+      if (hasTime && /\/groups\/[^/?#]+/i.test(current.innerHTML || "")) break;
+      if (current.matches("div[role='dialog'], div[role='main'], [role='article'], [role='complementary']")) break;
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+  return best;
+}
+
+function findSourceLink(container) {
+  const candidates = [...container.querySelectorAll("a[href*='/groups/']")]
+    .filter((anchor) => isVisibleElement(anchor))
+    .map((anchor) => ({ anchor, text: visibleText(anchor), href: normalizeUrl(anchor.href || "") }))
+    .filter(({ text, href }) => text && /\/groups\/[^/?#]+/i.test(href) && !looksLikeTime(text) && !isNoiseLine(text))
+    .sort((a, b) => a.anchor.getBoundingClientRect().top - b.anchor.getBoundingClientRect().top || a.text.length - b.text.length);
+  return candidates[0] || null;
+}
+
+function findSourceName(container) {
+  const source = findSourceLink(container);
+  if (source?.text) return source.text;
+  if (/\/groups\/feed\/?$/i.test(location.pathname)) return "群组总动态";
+  if (isFacebookGroupPage()) {
+    const heading = document.querySelector("h1");
+    const title = visibleText(heading);
+    if (title) return title;
+  }
+  if (isFacebookHomePage()) return "Facebook 首页";
+  if (isFacebookPhotoPage()) return "图片帖子";
+  return document.title.replace(/\| Facebook$/i, "").trim() || "未知来源";
+}
+
+function findSourceUrl(container, postUrl = "") {
+  const source = findSourceLink(container);
+  if (source?.href) return source.href;
+  if (/\/groups\/feed\/?$/i.test(location.pathname)) return normalizeUrl(window.location.href);
+  if (isFacebookPhotoPage() && postUrl) return postUrl;
+  return normalizeUrl(window.location.href);
 }
 
 function likelyPostContainers() {
@@ -295,7 +413,46 @@ function likelyPostContainers() {
     const nestedArticle = element.parentElement?.closest?.("[role='article'], [data-pagelet*='FeedUnit'], [aria-posinset]");
     return isVisibleElement(element) && !nestedArticle && rect.bottom > 0 && rect.top < window.innerHeight * 1.35 && text.length >= 10;
   });
-  return [...new Set(filtered)];
+  if (!isFacebookPhotoPage()) return [...new Set(filtered)];
+
+  const photoFallback = [...document.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
+    .filter((element) => isVisibleElement(element))
+    .filter((element) => {
+      const marker = [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("datetime"),
+        element.getAttribute("data-utime"),
+        visibleText(element)
+      ].map((candidate) => extractTimeFragment(candidate)).find(Boolean);
+      return Boolean(marker);
+    })
+    .flatMap((element) => {
+      const containers = [];
+      let current = element.parentElement;
+      let depth = 0;
+      while (current && depth < 10) {
+        const rect = current.getBoundingClientRect();
+        const text = visibleText(current);
+        if (isVisibleElement(current) && rect.width >= 220 && rect.height >= 80 && text.length >= 20) {
+          containers.push(current);
+        }
+        if (current.matches("div[role='dialog'], div[role='main'], [role='complementary']")) break;
+        current = current.parentElement;
+        depth += 1;
+      }
+      return containers;
+    })
+    .filter((element, index, list) => list.indexOf(element) === index)
+    .sort((a, b) => {
+      const areaA = a.getBoundingClientRect().width * a.getBoundingClientRect().height;
+      const areaB = b.getBoundingClientRect().width * b.getBoundingClientRect().height;
+      return areaA - areaB;
+    })
+    .filter((element, index, list) => !list.some((other, otherIndex) => otherIndex !== index && other.contains(element)))
+    .slice(0, 4);
+
+  return [...new Set([...photoFallback, ...filtered])];
 }
 
 function extractTimeFragment(value) {
@@ -306,14 +463,14 @@ function extractTimeFragment(value) {
     const parsed = new Date(millis);
     return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString();
   }
-  const relativeMatch = text.match(/(Just now|Now|Yesterday|刚刚|\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|分钟|分|小时|小時|天|周))/i);
-  if (relativeMatch?.[1]) return relativeMatch[1].trim();
+  const weekdayMatch = text.match(/(?:Today|Yesterday|Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Tues(?:day)?|Wed(?:nesday)?|Thu(?:rsday)?|Thur(?:sday)?|Fri(?:day)?|Sat(?:urday)?|今天|昨天|周[一二三四五六日天]|星期[一二三四五六日天])(?:\s+(?:at\s+)?)?(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?::\d{2})?\s*(?:[AP]M)?/i);
+  if (weekdayMatch?.[0]) return weekdayMatch[0].trim();
   const absoluteMatch = text.match(/\b(?:Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|Sept|September|Oct|October|Nov|November|Dec|December)\s+\d{1,2}(?:,\s*\d{4})?(?:\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?\b/i);
   if (absoluteMatch?.[0]) return absoluteMatch[0].trim();
   const chineseAbsoluteMatch = text.match(/(?:\d{4}年\s*)?\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?:[:：]\d{2})?)?/);
   if (chineseAbsoluteMatch?.[0]) return chineseAbsoluteMatch[0].trim();
-  const weekdayMatch = text.match(/(?:Today|Yesterday|Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Tues(?:day)?|Wed(?:nesday)?|Thu(?:rsday)?|Thur(?:sday)?|Fri(?:day)?|Sat(?:urday)?|今天|昨天|周[一二三四五六日天]|星期[一二三四五六日天])(?:\s+(?:at\s+)?)?(?:上午|下午|中午|晚上|早上)?\s*\d{1,2}(?::\d{2})?\s*(?:[AP]M)?/i);
-  if (weekdayMatch?.[0]) return weekdayMatch[0].trim();
+  const relativeMatch = text.match(/(Just now|Now|Today|Yesterday|刚刚|\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|分钟|分|小时|小時|天|周))/i);
+  if (relativeMatch?.[1]) return relativeMatch[1].trim();
   const isoMatch = text.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}(?:[:.]\d{2})(?:[:.]\d{2})?)?/);
   if (isoMatch?.[0]) return isoMatch[0].trim();
   const normalized = text.replace(/ at /i, " ").replace(/(\d{1,2})\.(\d{2})\.(\d{2})$/, "$1:$2:$3");
@@ -348,15 +505,12 @@ function topSectionLines(container) {
 }
 
 function findPostUrl(container) {
-  const anchors = [...container.querySelectorAll("a[href]")];
-  const postLink = anchors.find((anchor) => {
-    const href = anchor.href;
-    return href.includes("/posts/") || href.includes("/permalink/") || href.includes("story_fbid=") || href.includes("fbid=") || href.includes("set=pcb");
-  });
+  const postLink = findPreferredPostAnchor(container);
   return postLink ? normalizeUrl(postLink.href) : normalizeUrl(window.location.href);
 }
 
 function findRawTime(container) {
+  const preferredPostUrl = findPostUrl(container);
   const candidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
     .map((element) => {
@@ -368,10 +522,17 @@ function findRawTime(container) {
         visibleText(element)
       ].map((candidate) => extractTimeFragment(candidate)).find(Boolean);
       let score = 0;
+      const nearestAnchor = element.closest("a[href]");
+      const anchorHref = normalizeUrl(nearestAnchor?.href || "");
+      const hasVisibleText = Boolean(visibleText(element));
       if (value) score += 3;
       if (element.tagName.toLowerCase() === "time" || element.getAttribute("datetime")) score += 2;
-      if (element.closest("a[href*='/posts/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='fbid=']")) score += 3;
+      if (anchorHref && anchorHref === preferredPostUrl) score += 8;
+      if (isCanonicalPostHref(anchorHref)) score += 5;
+      if (isPhotoShellHref(anchorHref)) score += isFacebookPhotoPage() ? -3 : 2;
       if (element.tagName.toLowerCase() === "a") score += 1;
+      if (hasVisibleText) score += 2;
+      if (element.getAttribute("data-utime") && isFacebookPhotoPage() && !hasVisibleText) score -= 2;
       return { element, value: value || "", score };
     })
     .filter((item) => item.value)
@@ -384,20 +545,46 @@ function findRawTime(container) {
   return "";
 }
 
-function findAuthor(container) {
+function findAuthor(container, rawTimeText = "", sourceName = "") {
+  const timeCandidates = [...container.querySelectorAll("time, abbr, a[href], a[aria-label], span[aria-label], a[title], span[title], [data-utime]")]
+    .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
+    .map((element) => {
+      const value = [
+        element.getAttribute("aria-label"),
+        element.getAttribute("title"),
+        element.getAttribute("datetime"),
+        element.getAttribute("data-utime"),
+        visibleText(element)
+      ].map((candidate) => extractTimeFragment(candidate)).find(Boolean);
+      return value ? element : null;
+    })
+    .filter(Boolean);
+  const timeTop = timeCandidates[0]?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY;
   const candidates = [...container.querySelectorAll("strong, h2, h3, h4, a[href]")]
     .filter((element) => isVisibleElement(element) && isInTopSection(container, element))
-    .map((element) => ({ element, text: visibleText(element) }))
+    .map((element) => ({ element, text: visibleText(element), href: normalizeUrl(element.href || "") }))
     .filter(({ element, text }) => {
       if (!text || text.length > 80) return false;
-      if (looksLikeTime(text) || isNoiseLine(text)) return false;
+      if (text === rawTimeText || text === sourceName) return false;
+      if (looksLikeTime(text) || isNoiseLine(text) || isViewPostText(text)) return false;
       if (element.tagName.toLowerCase() === "a") {
         const href = element.href || "";
-        if (href.includes("/groups/") || href.includes("/posts/") || href.includes("/permalink/") || href.includes("comment_id=")) return false;
+        if (href.includes("/groups/") || href.includes("/posts/") || href.includes("/permalink/") || href.includes("comment_id=") || href.includes("/photo/")) return false;
       }
       return true;
     })
-    .sort((a, b) => a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top);
+    .map((candidate) => {
+      const rect = candidate.element.getBoundingClientRect();
+      let score = 0;
+      if (/^strong$/i.test(candidate.element.tagName)) score += 5;
+      if (/^h[234]$/i.test(candidate.element.tagName)) score += 4;
+      if (candidate.href && isProfileLikeHref(candidate.href)) score += 4;
+      if (candidate.href && isPhotoShellHref(candidate.href)) score -= 6;
+      if (candidate.href && isCanonicalPostHref(candidate.href)) score -= 6;
+      if (timeTop < Number.POSITIVE_INFINITY && rect.top <= timeTop + 18 && rect.top >= timeTop - 120) score += 6;
+      return { ...candidate, score, rectTop: rect.top };
+    })
+    .sort((a, b) => b.score - a.score || a.rectTop - b.rectTop);
   return candidates[0]?.text || "";
 }
 
@@ -432,12 +619,13 @@ function extractPostText(container, authorName, rawTimeText) {
 }
 
 function extractPost(container) {
-  const postUrl = findPostUrl(container);
-  const rawTimeText = findRawTime(container);
-  const groupName = findGroupName();
-  const groupUrl = findGroupUrl();
-  const authorName = findAuthor(container);
-  const postText = extractPostText(container, authorName, rawTimeText) || "未识别到正文";
+  const contextContainer = findPhotoPostContext(container);
+  const postUrl = findPostUrl(contextContainer);
+  const rawTimeText = findRawTime(contextContainer);
+  const groupName = findSourceName(contextContainer);
+  const groupUrl = findSourceUrl(contextContainer, postUrl);
+  const authorName = findAuthor(contextContainer, rawTimeText, groupName);
+  const postText = extractPostText(contextContainer, authorName, rawTimeText) || "未识别到正文";
   const postId = hash([postUrl, postText.slice(0, 120), groupName, rawTimeText].join("|"));
   return {
     postId,
@@ -840,7 +1028,7 @@ function startGroupMonitor(commandId, intervalSeconds, options = {}) {
 
 async function diagnose(commandId) {
   if (!isSupportedCollectionPage()) {
-    sendAck(commandId, "diagnose", false, "当前页面不是支持的 Facebook 采集页，请打开首页、groups/feed 或具体群组页。", "error", {
+    sendAck(commandId, "diagnose", false, "当前页面不是支持的 Facebook 采集页，请打开首页、groups/feed、具体群组页或图片帖子详情页。", "error", {
       facebookPage: location.href,
       contentScript: "injected",
       supportedCollectionPage: false
@@ -894,7 +1082,7 @@ async function runDesktopCommand(message) {
   if (requiresCollectionPage.has(message.type) && !isSupportedCollectionPage()) {
     return {
       ok: false,
-      message: "当前页面不是支持的 Facebook 采集页，请打开首页、groups/feed 或具体群组页。",
+      message: "当前页面不是支持的 Facebook 采集页，请打开首页、groups/feed、具体群组页或图片帖子详情页。",
       currentState: "error",
       url: location.href
     };

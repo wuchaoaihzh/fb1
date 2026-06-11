@@ -227,8 +227,20 @@ function isFacebookHomeUrl(url?: string): boolean {
   }
 }
 
+function isFacebookPhotoUrl(url?: string): boolean {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) return false;
+    if (!/^\/photo(?:\/|\.php|$)/i.test(parsed.pathname)) return false;
+    const setValue = parsed.searchParams.get("set") || "";
+    return parsed.searchParams.has("fbid") || /(^|[.:])pcb(?:[.:]|$)/i.test(setValue);
+  } catch {
+    return false;
+  }
+}
+
 function isCollectibleFacebookUrl(url?: string): boolean {
-  return isFacebookHomeUrl(url) || isFacebookGroupUrl(url);
+  return isFacebookHomeUrl(url) || isFacebookGroupUrl(url) || isFacebookPhotoUrl(url);
 }
 
 function activeHttpClients(excludedClientIds = new Set<string>()): ExtensionClientInfo[] {
@@ -546,7 +558,7 @@ function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost 
 
   return maybeAlert({
     postId,
-    groupName: input.groupName || "未知群组",
+    groupName: input.groupName || "未知标签",
     groupUrl: input.groupUrl || "",
     authorName: input.authorName || "",
     postText: text,
@@ -593,7 +605,7 @@ function addPosts(incoming: Partial<RadarPost>[], clientId?: string): void {
 
 function exportRows() {
   return [...posts.values()].map((post) => ({
-    群组名称: post.groupName,
+    标签或群组: post.groupName,
     发帖人: post.authorName,
     帖子内容: post.postText,
     帖子链接: post.postUrl,

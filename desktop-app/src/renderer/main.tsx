@@ -502,7 +502,7 @@ function App() {
       <header className="topbar">
         <div>
           <h1>Facebook Opportunity Radar <span className="version-badge">v{state.appVersion || "0.1.14"}</span></h1>
-          <p>仅采集当前已打开的 Facebook 首页、groups/feed 或群组页面，不会自动评论或发帖。</p>
+          <p>仅采集当前已打开的 Facebook 首页、groups/feed、群组页面或图片帖子详情页，不会自动评论或发帖。</p>
         </div>
         <div className={`connection ${socketReady ? "online" : "offline"}`}><Radio size={18} />{socketReady ? "本地服务已连接" : "本地服务未连接"}</div>
       </header>
@@ -589,7 +589,7 @@ function App() {
       <section className="panel monitor-panel">
         <div className="panel-head">
           <h2>群组监控</h2>
-          <span>仅群组页支持自动刷新；首页可采集但不会自动刷新</span>
+          <span>仅群组页支持自动刷新；首页和图片帖子详情页可采集但不会自动刷新</span>
         </div>
         <div className="monitor-tools">
           <input value={groupUrl} placeholder="添加 groups/feed 或具体群组链接，例如 https://www.facebook.com/groups/xxx" onChange={(event) => setGroupUrl(event.target.value)} />
@@ -662,7 +662,7 @@ function App() {
                 <th className="sticky-col">状态</th>
                 <th>评分</th>
                 <th>新帖</th>
-                <th>群组</th>
+                <th>标签/群组</th>
                 <th>内容摘要</th>
                 <th>发帖人</th>
                 <th>发布时间</th>
@@ -718,7 +718,7 @@ function App() {
                   </tr>
                 );
               })}
-              {posts.length === 0 && <tr><td colSpan={12} className="empty">等待插件发送帖子。请打开 Facebook 首页、groups/feed 或群组页面后点击“测试连接”或“开始采集”。</td></tr>}
+              {posts.length === 0 && <tr><td colSpan={12} className="empty">等待插件发送帖子。请打开 Facebook 首页、groups/feed、具体群组页或图片帖子详情页后点击“测试连接”或“开始采集”。</td></tr>}
             </tbody>
           </table>
         </div>
@@ -741,7 +741,7 @@ function App() {
           <dl>
             <dt>完整内容</dt><dd>{selectedPost.postText}</dd>
             <dt>翻译内容</dt><dd>{selectedPost.translatedText || "未翻译"}</dd>
-            <dt>群组</dt><dd>{selectedPost.groupName}</dd>
+            <dt>标签/群组</dt><dd>{selectedPost.groupName}</dd>
             <dt>发帖人</dt><dd>{selectedPost.authorName || "未识别"}</dd>
             <dt>原始时间</dt><dd>{selectedPost.rawTimeText || "未识别"}</dd>
             <dt>解析时间</dt><dd>{selectedPost.parsedPostTime}</dd>
