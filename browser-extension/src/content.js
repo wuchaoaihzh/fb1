@@ -215,6 +215,15 @@ function findGroupUrl() {
   return groupLink ? normalizeUrl(groupLink.href) : normalizeUrl(window.location.href);
 }
 
+function isFacebookGroupPage(url = window.location.href) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return /(^|\.)facebook\.com$/i.test(parsed.hostname) && (parsed.pathname.includes("/groups/") || parsed.pathname === "/groups/feed/");
+  } catch {
+    return false;
+  }
+}
+
 function likelyPostContainers() {
   const selectorGroups = [
     "div[role='feed'] [role='article']",
@@ -398,23 +407,43 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
       }
     }
   }
-  const matched = [];
+  const deliverable = [];
   const ignoredReasons = {};
+  let matchedCount = 0;
+  let unmatchedCount = 0;
   for (const post of scanned) {
     const decision = shouldKeepPost(post);
-    if (decision.keep) {
-      matched.push(post);
-    } else {
+    if (!post.postText || post.postText === "鏈瘑鍒埌姝ｆ枃") {
       ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
+      continue;
     }
+    if (decision.positive.length > 0) matchedCount += 1;
+    else unmatchedCount += 1;
+    if (decision.negative.length > 0) {
+      ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
+      continue;
+    }
+    if (!decision.keep && decision.reason !== "鏈尮閰嶉珮浠峰€兼垨鏅€氬叧閿瘝") {
+      ignoredReasons[decision.reason] = (ignoredReasons[decision.reason] || 0) + 1;
+      continue;
+    }
+    deliverable.push(post);
   }
-  const fresh = allowSeen ? matched : matched.filter((post) => {
+  const fresh = allowSeen ? deliverable : deliverable.filter((post) => {
     const key = post.postUrl && post.postUrl !== window.location.href ? post.postUrl : post.postId;
     if (seenKeys.has(key)) return false;
     seenKeys.add(key);
     return true;
   });
-  sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { containerCount: containers.length, ignoredReasons, sentCount: fresh.length, extractErrors: extractErrors.slice(0, 5) });
+  sendScanLog(scanned.length, matchedCount, scanned.length - deliverable.length, "visible_posts", {
+    containerCount: containers.length,
+    deliverableCount: deliverable.length,
+    unmatchedCount,
+    duplicateCount: Math.max(0, deliverable.length - fresh.length),
+    ignoredReasons,
+    sentCount: fresh.length,
+    extractErrors: extractErrors.slice(0, 5)
+  });
   if (fresh.length > 0) postJson(LOCAL_POSTS, { clientId: contentClientId, posts: fresh });
   return fresh;
 }
@@ -484,6 +513,17 @@ function dispatchWheel(target, distance) {
 
 async function wait(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function collectAfterScroll(delayMs) {
+  const settleMs = Math.max(1200, Math.min(2500, Math.floor((delayMs || 3000) * 0.5)));
+  await wait(settleMs);
+  let posts = collectVisiblePosts();
+  if (posts.length === 0) {
+    await wait(900);
+    posts = collectVisiblePosts();
+  }
+  return posts;
 }
 
 async function humanScrollBy(target, distance) {
@@ -606,7 +646,7 @@ async function startAutoScroll(commandId, total, delayMs) {
     }
 
     const scrollResult = await tryScrollOnce();
-    const posts = collectVisiblePosts();
+    const posts = await collectAfterScroll(delayMs);
     sendAck(
       commandId,
       "start_auto_scroll",
@@ -623,7 +663,7 @@ async function startAutoScroll(commandId, total, delayMs) {
       }
     );
     if (!scrollResult.ok) return;
-    await wait(delayMs);
+    await wait(Math.max(500, delayMs));
   }
 
   sendAck(commandId, "start_auto_scroll", true, "自动滚动已完成", "collecting", {
@@ -649,6 +689,14 @@ function startGroupMonitor(commandId, intervalSeconds) {
 }
 
 async function diagnose(commandId) {
+  if (!isFacebookGroupPage()) {
+    sendAck(commandId, "diagnose", false, "Current page is not a Facebook group page. Open groups/feed or a specific group first.", "error", {
+      facebookPage: location.href,
+      contentScript: "injected",
+      groupPage: false
+    });
+    return;
+  }
   const posts = collectVisiblePosts({ allowSeen: true });
   const scrollResult = await tryScrollOnce();
   sendAck(
@@ -675,7 +723,30 @@ async function runDesktopCommand(message) {
     return { ok: true, message: "关键词和配置已同步到 content script", currentState: collecting ? "collecting" : "paused" };
   }
   if (message.type === "ping_content") return { ok: true, url: location.href, currentState: collecting ? "collecting" : "stopped" };
+  const requiresGroupPage = new Set([
+    "collect_now",
+    "collect_once",
+    "start_collecting",
+    "start_auto_scroll",
+    "stop_auto_scroll",
+    "test_scroll_once",
+    "scroll_once",
+    "diagnose",
+    "start_group_monitor",
+    "start_monitoring",
+    "stop_group_monitor",
+    "stop_monitoring"
+  ]);
+  if (requiresGroupPage.has(message.type) && !isFacebookGroupPage()) {
+    return {
+      ok: false,
+      message: "Current page is not a Facebook group page. Open groups/feed or a specific group first.",
+      currentState: "error",
+      url: location.href
+    };
+  }
   if (message.type === "collect_now" || message.type === "collect_once" || message.type === "start_collecting") {
+    seenKeys.clear();
     startCollectLoop({ allowSeen: true });
     const posts = collectVisiblePosts({ allowSeen: true });
     return { ok: true, message: `采集已启动，后台正在监听此 Facebook 页面；本次发现 ${posts.length} 个新帖子`, count: posts.length, currentState: "collecting" };
@@ -708,7 +779,7 @@ async function runDesktopCommand(message) {
       const debuggerResult = await requestDebuggerScroll(result.distance || Math.floor(window.innerHeight * 0.8), message.commandId || `scroll-${Date.now()}`);
       result = debuggerResult.ok ? debuggerResult : { ...result, debuggerResult, error: `${result.error || "dom_scroll_failed"}; ${debuggerResult.error || "debugger_scroll_failed"}` };
     }
-    const posts = result.ok ? collectVisiblePosts() : [];
+    const posts = result.ok ? await collectAfterScroll(2500) : [];
     return { ...result, message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 个新帖子` : result.error, currentState: result.ok ? "collecting" : "error", collectedCount: posts.length };
   }
   if (message.type === "diagnose") {

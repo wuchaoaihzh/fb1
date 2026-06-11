@@ -30,6 +30,8 @@ app.setName("Facebook Opportunity Radar");
 let mainWindow: BrowserWindow | null = null;
 let settings: RadarSettings = defaultSettings;
 let collectionState: CollectionState = "stopped";
+let scrollState: "stopped" | "starting" | "scrolling" | "stopped_with_data" | "error" = "stopped";
+let scrollProgress = { currentStep: 0, totalSteps: 0, delayMs: 0, collectedCount: 0 };
 const posts = new Map<string, RadarPost>();
 const clients = new Map<WebSocket, ExtensionClientInfo>();
 const httpClients = new Map<string, ExtensionClientInfo & { lastSeenAt: number }>();
@@ -197,6 +199,15 @@ function isFacebookUrl(url?: string): boolean {
   return /^https:\/\/(www\.)?facebook\.com\//.test(String(url || ""));
 }
 
+function isFacebookGroupUrl(url?: string): boolean {
+  try {
+    const parsed = new URL(String(url || ""));
+    return /(^|\.)facebook\.com$/i.test(parsed.hostname) && (parsed.pathname.includes("/groups/") || parsed.pathname === "/groups/feed/");
+  } catch {
+    return false;
+  }
+}
+
 function activeHttpClients(excludedClientIds = new Set<string>()): ExtensionClientInfo[] {
   const now = Date.now();
   const active: ExtensionClientInfo[] = [];
@@ -220,7 +231,7 @@ function activeCommandClients(): ExtensionClientInfo[] {
   const active: ExtensionClientInfo[] = [];
   httpClients.forEach((client) => {
     if (now - client.lastSeenAt > 10000) return;
-    if (!isFacebookUrl(client.tabUrl)) return;
+    if (!isFacebookGroupUrl(client.tabUrl)) return;
     if (client.clientId.startsWith("content-")) {
       active.unshift({
         clientId: client.clientId,
@@ -248,6 +259,8 @@ function appState() {
       posts: [...posts.values()].sort((a, b) => b.collectedAt.localeCompare(a.collectedAt)),
       settings,
       collectionState,
+      scrollState,
+      scrollProgress,
       appVersion,
       operationLog,
       stats: stats(),
@@ -292,6 +305,19 @@ function handleCommandAck(message: Extract<BridgeMessage, { type: "command_ack" 
     });
   }
   collectionState = message.pluginState || message.currentState || "error";
+  if (message.commandType === "start_auto_scroll" || message.commandType === "scroll_once") {
+    scrollState = message.success ? (message.details?.currentStep && message.details.currentStep >= (message.details.totalSteps || 1) ? "stopped_with_data" : "scrolling") : "error";
+    if (message.details) {
+      scrollProgress = {
+        currentStep: Number(message.details.currentStep || 0),
+        totalSteps: Number(message.details.totalSteps || 0),
+        delayMs: Number(message.details.delayMs || 0),
+        collectedCount: Number(message.details.collectedCount || 0)
+      };
+    }
+  } else if (message.commandType === "stop_auto_scroll") {
+    scrollState = "stopped";
+  }
   const detailText = message.details ? `；详情：${JSON.stringify(message.details)}` : "";
   const locationText = message.url ? `；页面：${message.url}` : "";
   addOperation(`插件确认：${message.message}${locationText}${detailText}`, message.success ? "success" : "error");
@@ -422,20 +448,22 @@ function enrichPost(input: Partial<RadarPost>, clientId = "unknown"): RadarPost 
 function addPosts(incoming: Partial<RadarPost>[], clientId?: string): void {
   let count = 0;
   let ignored = 0;
+  let duplicates = 0;
   incoming.forEach((item) => {
     const post = enrichPost(item, clientId);
-    if (post.matchedKeywords.length === 0 || post.negativeKeywords.length > 0 || post.postText === "未识别到正文") {
+    if (!post.postText || post.postText === "未识别到正文") {
       ignored += 1;
       return;
     }
     const key = dedupeKey(post);
     const previous = posts.get(key);
     posts.set(key, previous ? { ...previous, ...post, alertTriggered: previous.alertTriggered || post.alertTriggered } : post);
-    count += previous ? 0 : 1;
+    if (previous) duplicates += 1;
+    else count += 1;
   });
   persistPosts();
-  log("Posts collected", { count, source: clientId });
-  addOperation(`已加入实时帖子列表：${count} 条；关键词过滤忽略：${ignored} 条`, count > 0 ? "success" : "info");
+  log("Posts collected", { count, duplicates, ignored, source: clientId });
+  addOperation(`已加入实时帖子列表：${count} 条；重复更新：${duplicates} 条；无正文忽略：${ignored} 条`, count > 0 ? "success" : "info");
   broadcastState();
 }
 
