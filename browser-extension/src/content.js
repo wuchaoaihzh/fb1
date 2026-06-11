@@ -372,6 +372,87 @@ function secondTopSectionRow(container) {
   return rows[1] || rows[0] || null;
 }
 
+function parseJsonScriptText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function walkForPhotoStoryFallback(node, result = []) {
+  if (!node) return result;
+  if (Array.isArray(node)) {
+    for (const item of node) walkForPhotoStoryFallback(item, result);
+    return result;
+  }
+  if (typeof node !== "object") return result;
+
+  const actorName = node?.story?.actors?.[0]?.name;
+  const actorUrl = node?.story?.actors?.[0]?.url || node?.story?.actors?.[0]?.profile_url;
+  const storyUrl = node?.story?.url;
+  const creationTime = node?.story?.creation_time;
+  if (actorName && storyUrl && creationTime) {
+    result.push({
+      authorName: actorName,
+      authorUrl: normalizeUrl(actorUrl || ""),
+      postUrl: normalizeUrl(storyUrl),
+      rawTimestamp: Number(creationTime) * 1000,
+      timestampKind: "creation_time"
+    });
+  }
+
+  const shareable = node?.shareable_from_perspective_of_feed_ufi;
+  const publishTime = node?.page_insights && typeof node?.page_insights === "object"
+    ? Object.values(node.page_insights).find((entry) => entry?.post_context?.publish_time)?.post_context?.publish_time
+    : null;
+  const messageText = node?.message?.text;
+  const actors = Array.isArray(node?.actors) ? node.actors : [];
+  if (shareable?.url && publishTime && actors[0]?.name) {
+    result.push({
+      authorName: actors[0].name,
+      authorUrl: normalizeUrl(actors[0].url || actors[0].profile_url || ""),
+      postUrl: normalizeUrl(shareable.url),
+      rawTimestamp: Number(publishTime) * 1000,
+      timestampKind: "publish_time",
+      postText: typeof messageText === "string" ? messageText : ""
+    });
+  }
+
+  for (const value of Object.values(node)) {
+    walkForPhotoStoryFallback(value, result);
+  }
+  return result;
+}
+
+function formatPhotoFallbackTime(timestampMs) {
+  if (!timestampMs || !Number.isFinite(timestampMs)) return "";
+  const date = new Date(timestampMs);
+  if (Number.isNaN(date.getTime())) return "";
+  const month = date.toLocaleString("en-US", { month: "long" });
+  return `${date.getDate()} ${month} at ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function findPhotoStoryFallback() {
+  if (!isFacebookPhotoPage()) return null;
+  const candidates = [];
+  for (const script of document.querySelectorAll("script[type='application/json'], script")) {
+    const text = script.textContent || "";
+    if (!text || (!text.includes("Barmaksiz") && !text.includes("CometPhotoRootContentQuery") && !text.includes("publish_time") && !text.includes("creation_time"))) continue;
+    const parsed = parseJsonScriptText(text);
+    if (!parsed) continue;
+    walkForPhotoStoryFallback(parsed, candidates);
+  }
+  const filtered = candidates
+    .filter((item) => item?.authorName && item?.postUrl && item?.rawTimestamp)
+    .sort((a, b) => {
+      const kindScoreA = a.timestampKind === "publish_time" ? 1 : 0;
+      const kindScoreB = b.timestampKind === "publish_time" ? 1 : 0;
+      return kindScoreB - kindScoreA || b.rawTimestamp - a.rawTimestamp;
+    });
+  return filtered[0] || null;
+}
+
 function findSourceLink(container) {
   const candidates = [...container.querySelectorAll("a[href*='/groups/']")]
     .filter((anchor) => isVisibleElement(anchor))
@@ -652,12 +733,15 @@ function extractPostText(container, authorName, rawTimeText) {
 
 function extractPost(container) {
   const contextContainer = findPhotoPostContext(container);
-  const postUrl = findPostUrl(contextContainer);
-  const rawTimeText = findRawTime(contextContainer);
+  const photoFallback = findPhotoStoryFallback();
+  const domPostUrl = findPostUrl(contextContainer);
+  const domRawTimeText = findRawTime(contextContainer);
+  const postUrl = photoFallback?.postUrl || domPostUrl;
+  const rawTimeText = photoFallback?.rawTimestamp ? formatPhotoFallbackTime(photoFallback.rawTimestamp) : domRawTimeText;
   const groupName = findSourceName(contextContainer);
   const groupUrl = findSourceUrl(contextContainer, postUrl);
-  const authorName = findAuthor(contextContainer, rawTimeText, groupName);
-  const postText = extractPostText(contextContainer, authorName, rawTimeText) || "未识别到正文";
+  const authorName = photoFallback?.authorName || findAuthor(contextContainer, rawTimeText, groupName);
+  const postText = extractPostText(contextContainer, authorName, rawTimeText) || photoFallback?.postText || "未识别到正文";
   const postId = hash([postUrl, postText.slice(0, 120), groupName, rawTimeText].join("|"));
   return {
     postId,
