@@ -1,4 +1,4 @@
-let collecting = true;
+let collecting = false;
 let autoScrollStopped = false;
 let monitorTimer = null;
 let latestSettings = null;
@@ -18,8 +18,17 @@ function stopAllLocalWork() {
   if (feedObserver) feedObserver.disconnect();
 }
 
+function isExtensionContextValid() {
+  try {
+    return Boolean(contextActive && chrome && chrome.runtime && chrome.runtime.id);
+  } catch {
+    stopAllLocalWork();
+    return false;
+  }
+}
+
 function safeSendMessage(message) {
-  if (!contextActive || !chrome?.runtime?.id) return Promise.resolve({ ok: false, error: "extension_context_invalidated" });
+  if (!isExtensionContextValid()) return Promise.resolve({ ok: false, error: "extension_context_invalidated" });
   return new Promise((resolve) => {
     try {
       chrome.runtime.sendMessage(message, (response) => {
@@ -639,7 +648,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-window.addEventListener("scroll", () => setTimeout(collectVisiblePosts, 900));
-feedObserver = new MutationObserver(() => setTimeout(collectVisiblePosts, 1200));
-feedObserver.observe(document.documentElement, { childList: true, subtree: true });
-setTimeout(collectVisiblePosts, 1500);
+// Collection is intentionally command-driven. The desktop app or popup must send
+// start_collecting/collect_now before this script scans the page.
