@@ -378,6 +378,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     postAck({ ...message, clientId, tabId: sender.tab?.id || message.tabId, url: sender.tab?.url || message.url }).then(() => sendResponse({ ok: true }));
     return true;
   }
+  if (message.type === "debugger_scroll_request") {
+    const tabId = sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: "debugger_scroll_request_missing_tab" });
+      return false;
+    }
+    debuggerMouseWheel(tabId, Number(message.distance) || undefined).then((result) => {
+      postAck({
+        clientId,
+        type: "command_ack",
+        commandId: message.commandId || `debugger-scroll-${Date.now()}`,
+        commandType: "scroll_once",
+        command: "scroll_once",
+        success: result.ok,
+        message: result.ok ? "CDP mouseWheel background scroll command sent" : result.error || "CDP mouseWheel failed",
+        currentState: result.ok ? "collecting" : "error",
+        pluginState: result.ok ? "collecting" : "error",
+        timestamp: new Date().toISOString(),
+        tabId,
+        url: sender.tab?.url || message.url,
+        details: { debuggerResult: result }
+      }).finally(() => sendResponse(result));
+    });
+    return true;
+  }
   if (message.type === "collect_current_tab") {
     runExtensionCommand({ type: "start_collecting", commandId: `popup-${Date.now()}` }).then(() => sendResponse({ ok: true, connected }));
     return true;

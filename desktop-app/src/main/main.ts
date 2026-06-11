@@ -24,7 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 const serverPort = 8765;
-const appVersion = "0.1.7";
+const appVersion = "0.1.8";
 app.setName("Facebook Opportunity Radar");
 
 let mainWindow: BrowserWindow | null = null;
@@ -528,7 +528,7 @@ function createWindow(): void {
     minHeight: 680,
     title: "Facebook Opportunity Radar",
     webPreferences: {
-      preload: path.join(__dirname, "preload.js")
+      preload: path.join(__dirname, "preload.cjs")
     }
   });
 

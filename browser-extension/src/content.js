@@ -78,6 +78,32 @@ function safeSendMessage(message) {
   });
 }
 
+async function requestDebuggerScroll(distance, commandId) {
+  const response = await safeSendMessage({
+    type: "debugger_scroll_request",
+    commandId,
+    distance,
+    url: location.href
+  });
+  if (response?.ok) {
+    return {
+      ok: true,
+      method: response.method || "cdp-debugger-mouseWheel",
+      distance: response.distance || distance,
+      beforeScrollTop: null,
+      afterScrollTop: null,
+      debuggerResult: response
+    };
+  }
+  return {
+    ok: false,
+    method: "cdp-debugger-mouseWheel",
+    distance,
+    error: response?.error || response?.message || "debugger_scroll_request_failed",
+    debuggerResult: response
+  };
+}
+
 window.addEventListener("error", (event) => {
   if (String(event.message || "").includes("Extension context invalidated")) {
     stopAllLocalWork();
@@ -338,9 +364,21 @@ function sendScanLog(scannedCount, matchedCount, ignoredCount, source, extra = {
 function collectVisiblePosts({ allowSeen = false } = {}) {
   if (!contextActive) return [];
   if (!collecting) return [];
-  const scanned = likelyPostContainers()
-    .map(extractPost)
-    .filter((post) => post.postText.length >= 8 && !isNoiseLine(post.postText));
+  const scanned = [];
+  const extractErrors = [];
+  for (const container of likelyPostContainers()) {
+    try {
+      const post = extractPost(container);
+      if (post.postText.length >= 8 && !isNoiseLine(post.postText)) scanned.push(post);
+    } catch (error) {
+      const message = String(error?.message || error);
+      extractErrors.push(message);
+      if (message.includes("Extension context invalidated")) {
+        stopAllLocalWork();
+        break;
+      }
+    }
+  }
   const matched = [];
   const ignoredReasons = {};
   for (const post of scanned) {
@@ -357,7 +395,7 @@ function collectVisiblePosts({ allowSeen = false } = {}) {
     seenKeys.add(key);
     return true;
   });
-  sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { ignoredReasons, sentCount: fresh.length });
+  sendScanLog(scanned.length, matched.length, scanned.length - matched.length, "visible_posts", { ignoredReasons, sentCount: fresh.length, extractErrors: extractErrors.slice(0, 5) });
   if (fresh.length > 0) postJson(LOCAL_POSTS, { clientId: contentClientId, posts: fresh });
   return fresh;
 }
@@ -643,7 +681,11 @@ async function runDesktopCommand(message) {
     return { ok: true, message: "自动滚动已停止", currentState: collecting ? "collecting" : "paused" };
   }
   if (message.type === "test_scroll_once" || message.type === "scroll_once") {
-    const result = await tryScrollOnce();
+    let result = await tryScrollOnce();
+    if (!result.ok) {
+      const debuggerResult = await requestDebuggerScroll(result.distance || Math.floor(window.innerHeight * 0.8), message.commandId || `scroll-${Date.now()}`);
+      result = debuggerResult.ok ? debuggerResult : { ...result, debuggerResult, error: `${result.error || "dom_scroll_failed"}; ${debuggerResult.error || "debugger_scroll_failed"}` };
+    }
     const posts = result.ok ? collectVisiblePosts() : [];
     return { ...result, message: result.ok ? `测试滚动成功，本次采集到 ${posts.length} 个新帖子` : result.error, currentState: result.ok ? "collecting" : "error", collectedCount: posts.length };
   }
@@ -681,10 +723,12 @@ async function pollDesktopCommands() {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  runDesktopCommand(message).then(sendResponse);
-  return true;
-});
+if (isExtensionContextValid()) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    runDesktopCommand(message).then(sendResponse);
+    return true;
+  });
+}
 
 // Collection is intentionally command-driven. The desktop app or popup must send
 // start_collecting/collect_now before this script scans the page.
