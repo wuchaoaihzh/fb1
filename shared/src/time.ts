@@ -122,6 +122,11 @@ function matchNumbered(text: string, patterns: RegExp[], multiplier: number, now
 
 function normalizeAbsoluteTimeText(text: string): string {
   return text
+    .replace(/\u00A0|\u202F/g, " ")
+    .replace(/(\d{1,2}:\d{2})(?:\s|[^\da-zA-Z])+(AM|PM)\b/gi, "$1 $2")
+    .replace(/(\d{1,2})(?:\s|[^\da-zA-Z])+(AM|PM)\b/gi, "$1 $2")
+    .replace(/(\d{1,2}:\d{2})(?:\s|[^\da-zA-Z]){1,4}M\b/gi, "$1 PM")
+    .replace(/(\d{1,2})(?:\s|[^\da-zA-Z]){1,4}M\b/gi, "$1 PM")
     .replace(/\s+/g, " ")
     .replace(/\s*[·|]\s*/g, " ")
     .replace(/\bEdited\b/gi, " ")
